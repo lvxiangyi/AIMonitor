@@ -1,0 +1,16 @@
+{
+  "name": "focusguard-agent",
+  "version": "1.0.0",
+  "description": "AI学習監督アシスタント",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "electron-is-dev": "^2.0.0"
+  },
+  "devDependencies": {
+    "electron": "^22.3.0"
+  }
+}

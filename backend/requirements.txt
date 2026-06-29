@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+mss
+Pillow
+python-dotenv
+openai
+pydantic

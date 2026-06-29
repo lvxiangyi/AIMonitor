@@ -1,0 +1,10 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.env
+logs/
+backend/screenshots/
+*.jpg
+.vite/
+package-lock.json
