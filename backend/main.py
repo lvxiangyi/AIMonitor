@@ -1,13 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 import json
-from pathlib import Path
 
+from data_paths import LOGS_DIR
 from session_manager import session_manager
 from schedule_manager import add_schedule, get_schedules, delete_schedule
 from quiz_generator import generate_quiz, record_wrong_answer, get_wrong_answers
+from settings_manager import get_settings_payload, save_settings
 
 app = FastAPI(title="FocusGuard Agent API")
 
@@ -18,9 +19,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-LOGS_DIR = Path(__file__).parent.parent / "logs"
-
 
 # --- Session APIs ---
 
@@ -41,6 +39,10 @@ class AcknowledgeRequest(BaseModel):
 class DisputeRequest(BaseModel):
     session_id: Optional[str] = None
     reason: str
+
+
+class SettingsRequest(BaseModel):
+    model: str
 
 
 @app.post("/session/start")
@@ -74,6 +76,22 @@ async def acknowledge_block(req: AcknowledgeRequest):
 async def dispute_judgement(req: DisputeRequest):
     result = session_manager.dispute(req.reason)
     return result
+
+
+# --- Settings APIs ---
+
+@app.get("/settings")
+async def api_get_settings():
+    return get_settings_payload()
+
+
+@app.post("/settings")
+async def api_save_settings(req: SettingsRequest):
+    try:
+        settings = save_settings({"model": req.model})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"settings": settings, "status": "saved"}
 
 
 # --- Quiz APIs ---

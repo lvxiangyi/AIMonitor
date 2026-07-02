@@ -1,9 +1,12 @@
 node_modules/
 dist/
+.venv/
+backend/.venv/
 __pycache__/
 *.pyc
 .env
 logs/
+data/
 backend/screenshots/
 *.jpg
 .vite/

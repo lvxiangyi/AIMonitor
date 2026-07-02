@@ -5,6 +5,7 @@ import random
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from settings_manager import get_selected_model
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -116,18 +117,22 @@ def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> di
     """Judge whether the user is on task based on a screenshot."""
     if not OPENROUTER_API_KEY or OPENROUTER_API_KEY == "your_api_key_here":
         print("[vision_judge] No valid API key found, using mock mode.")
-        return _mock_judge(task)
+        result = _mock_judge(task)
+        result["model"] = "mock"
+        return result
 
     memory_context = _format_memory_context(memory or [])
 
     try:
         client = _get_client()
+        model = get_selected_model()
+        print(f"[vision_judge] Using model: {model}")
 
         with open(screenshot_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
 
         response = client.chat.completions.create(
-            model="openai/gpt-4o",
+            model=model,
             messages=[
                 {
                     "role": "user",
@@ -155,6 +160,7 @@ def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> di
             content = content.rsplit("```", 1)[0]
 
         result = json.loads(content)
+        result["model"] = model
         return result
 
     except Exception as e:
@@ -173,9 +179,11 @@ def evaluate_dispute(task: str, activity: str, original_reason: str, user_reason
 
     try:
         client = _get_client()
+        model = get_selected_model()
+        print(f"[vision_judge] Using model for dispute: {model}")
 
         response = client.chat.completions.create(
-            model="openai/gpt-4o",
+            model=model,
             messages=[
                 {
                     "role": "user",

@@ -1,48 +1,138 @@
-﻿const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
+const http = require('http');
 
 let mainWindow;
 let backendProcess = null;
 let BACKEND_PORT = 8899;
 
-// Find a free port
-function findFreePort(startPort = 8899) {
-  return new Promise((resolve, reject) => {
+const repoRoot = path.join(__dirname, '..');
+const dataEnv = process.env.AIMONITOR_DATA_ENV || 'prod';
+const logsDir = path.join(repoRoot, 'data', dataEnv, 'logs');
+const appLogPath = path.join(logsDir, 'app.log');
+
+function writeAppLog(message) {
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+    fs.appendFileSync(appLogPath, `[${new Date().toISOString()}] ${message}\n`, 'utf8');
+  } catch (e) {
+    console.error('[app] Failed to write app log:', e);
+  }
+}
+
+function logInfo(message) {
+  console.log(message);
+  writeAppLog(message);
+}
+
+function logWarn(message) {
+  console.warn(message);
+  writeAppLog(message);
+}
+
+function logError(message, error) {
+  console.error(message, error || '');
+  writeAppLog(error ? `${message} ${error.stack || error}` : message);
+}
+
+function getFreePort(startPort = 8899) {
+  return new Promise((resolve) => {
     const server = net.createServer();
+    server.unref();
     server.listen(startPort, '127.0.0.1', () => {
       const port = server.address().port;
       server.close(() => resolve(port));
     });
     server.on('error', () => {
-      // Try next port
-      resolve(findFreePort(startPort + 1));
+      resolve(getFreePort(startPort + 1));
     });
   });
 }
 
 function startBackend(port) {
   const backendDir = path.join(__dirname, '..', 'backend');
+  const venvPython = path.join(backendDir, '.venv', 'Scripts', 'python.exe');
+  let pythonCommand = venvPython;
 
-  backendProcess = spawn('python', ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)], {
-    cwd: backendDir,
-    shell: true,
-    env: { ...process.env, FOCUSGUARD_PORT: String(port) },
-  });
+  if (!fs.existsSync(venvPython)) {
+    pythonCommand = 'python';
+    logWarn(`[backend] ${venvPython} was not found. Falling back to global "python". Run setup_windows.bat to create the project virtual environment.`);
+  }
+
+  backendProcess = spawn(
+    pythonCommand,
+    ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)],
+    {
+      cwd: backendDir,
+      shell: false,
+      env: {
+        ...process.env,
+        FOCUSGUARD_PORT: String(port),
+        AIMONITOR_DATA_ENV: process.env.AIMONITOR_DATA_ENV || 'prod',
+      },
+    },
+  );
 
   backendProcess.stdout.on('data', (data) => {
-    console.log(`[backend] ${data}`);
+    const message = `[backend] ${data}`;
+    process.stdout.write(message);
+    writeAppLog(message.trimEnd());
   });
 
   backendProcess.stderr.on('data', (data) => {
-    console.log(`[backend] ${data}`);
+    const message = `[backend] ${data}`;
+    process.stderr.write(message);
+    writeAppLog(message.trimEnd());
   });
 
   backendProcess.on('error', (err) => {
-    console.error('[backend] Failed to start:', err);
+    logError('[backend] Failed to start:', err);
   });
+
+  backendProcess.on('exit', (code, signal) => {
+    logInfo(`[backend] exited with code=${code} signal=${signal}`);
+    backendProcess = null;
+  });
+}
+
+function renderMissingFrontendPage() {
+  const message = [
+    'Production frontend build not found.',
+    '',
+    'Run:',
+    '  cd frontend',
+    '  npm install',
+    '  npm run build',
+  ].join('\n');
+
+  dialog.showErrorBox('FocusGuard frontend is not built', message);
+  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>FocusGuard setup needed</title>
+        <style>
+          body { margin: 0; font-family: Segoe UI, sans-serif; background: #111827; color: #f9fafb; display: grid; min-height: 100vh; place-items: center; }
+          main { max-width: 680px; padding: 32px; }
+          h1 { margin-top: 0; }
+          pre { background: #030712; padding: 16px; border-radius: 8px; overflow: auto; }
+        </style>
+      </head>
+      <body>
+        <main>
+          <h1>Frontend build not found</h1>
+          <p>Run these commands from the repository root, then start the app again:</p>
+          <pre>cd frontend
+npm install
+npm run build</pre>
+        </main>
+      </body>
+    </html>
+  `)}`);
 }
 
 function createWindow(port) {
@@ -59,14 +149,19 @@ function createWindow(port) {
     autoHideMenuBar: true,
   });
 
-  // Load frontend with port info injected
+  const apiBase = `http://127.0.0.1:${port}`;
   const frontendPath = path.join(__dirname, '..', 'frontend', 'dist', 'index.html');
-  mainWindow.loadFile(frontendPath);
 
-  // After page loads, inject the correct backend port
-  mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents.executeJavaScript(`window.__BACKEND_PORT__ = ${port};`);
-  });
+  if (process.env.AIMONITOR_ELECTRON_DEV === '1') {
+    const devUrl = process.env.AIMONITOR_FRONTEND_DEV_URL || 'http://127.0.0.1:3000';
+    mainWindow.loadURL(`${devUrl}?apiBase=${encodeURIComponent(apiBase)}`);
+  } else if (fs.existsSync(frontendPath)) {
+    mainWindow.loadFile(frontendPath, {
+      query: { apiBase },
+    });
+  } else {
+    renderMissingFrontendPage();
+  }
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -75,12 +170,11 @@ function createWindow(port) {
 
 function waitForBackend(port, retries = 30) {
   return new Promise((resolve, reject) => {
-    const http = require('http');
     let attempts = 0;
 
     const check = () => {
       attempts++;
-      const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
+      const req = http.get(`http://127.0.0.1:${port}/`, () => {
         resolve();
       });
       req.on('error', () => {
@@ -92,43 +186,51 @@ function waitForBackend(port, retries = 30) {
       });
       req.end();
     };
+
     check();
   });
 }
 
+function stopBackend() {
+  if (!backendProcess) {
+    return;
+  }
+
+  const pid = backendProcess.pid;
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(pid), '/t', '/f'], { windowsHide: true });
+  } else {
+    backendProcess.kill('SIGTERM');
+  }
+  backendProcess = null;
+}
+
 app.whenReady().then(async () => {
-  // Find free port and start
-  BACKEND_PORT = await findFreePort(8899);
-  console.log(`[app] Using port ${BACKEND_PORT}`);
+  if (process.env.AIMONITOR_SKIP_BACKEND === '1') {
+    BACKEND_PORT = Number(process.env.AIMONITOR_BACKEND_PORT || 8000);
+    logInfo(`[app] Using existing backend on port ${BACKEND_PORT}`);
+  } else {
+    BACKEND_PORT = await getFreePort(8899);
+    logInfo(`[app] Using port ${BACKEND_PORT}`);
 
-  // Write port to a file so frontend api.js can read it at build time
-  // But for runtime, we'll use a simpler approach: write a config file the frontend reads
-  const portFile = path.join(__dirname, '..', 'frontend', 'dist', 'port.json');
-  fs.writeFileSync(portFile, JSON.stringify({ port: BACKEND_PORT }));
-
-  startBackend(BACKEND_PORT);
+    startBackend(BACKEND_PORT);
+  }
 
   try {
     await waitForBackend(BACKEND_PORT);
-    console.log('[app] Backend is ready');
+    logInfo('[app] Backend is ready');
   } catch (e) {
-    console.error('[app] Backend failed to start, launching anyway...');
+    logError('[app] Backend failed to start, launching window anyway:', e);
   }
 
   createWindow(BACKEND_PORT);
 });
 
 app.on('window-all-closed', () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
+  stopBackend();
   app.quit();
 });
 
 app.on('before-quit', () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
+  stopBackend();
 });

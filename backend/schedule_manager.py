@@ -6,10 +6,9 @@ Stores schedules in a JSON file.
 import json
 import uuid
 from datetime import datetime
-from pathlib import Path
 
-LOGS_DIR = Path(__file__).parent.parent / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
+from data_paths import LOGS_DIR
+
 SCHEDULE_FILE = LOGS_DIR / "schedules.json"
 
 

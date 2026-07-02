@@ -1,26 +1,27 @@
-// Dynamically determine backend port
-// In Electron, port.json is written by main.js before page loads
-// In dev mode, fallback to 8899
-let API_BASE = 'http://127.0.0.1:8899';
+const DEFAULT_API_BASE = 'http://127.0.0.1:8000';
 
-async function initPort() {
-  try {
-    const res = await fetch('./port.json');
-    if (res.ok) {
-      const data = await res.json();
-      API_BASE = `http://127.0.0.1:${data.port}`;
-    }
-  } catch (e) {
-    // Use default
+function getApiBase() {
+  const params = new URLSearchParams(window.location.search);
+  const apiBase = params.get('apiBase');
+
+  if (apiBase) {
+    return apiBase.replace(/\/$/, '');
   }
+
+  if (window.__AIMONITOR_API_BASE__) {
+    return String(window.__AIMONITOR_API_BASE__).replace(/\/$/, '');
+  }
+
+  return DEFAULT_API_BASE;
 }
 
-// Initialize on load
-const portReady = initPort();
+const API_BASE = getApiBase();
 
 async function api(path, options) {
-  await portReady;
   const res = await fetch(`${API_BASE}${path}`, options);
+  if (!res.ok) {
+    throw new Error(`API request failed: ${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -76,8 +77,20 @@ export async function getWrongAnswers() {
   return api('/quiz/wrong-answers');
 }
 
-
 // Test trigger
 export async function testBlock() {
   return api('/session/test-block', { method: 'POST' });
+}
+
+// Settings APIs
+export async function getSettings() {
+  return api('/settings');
+}
+
+export async function saveSettings(model) {
+  return api('/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
 }

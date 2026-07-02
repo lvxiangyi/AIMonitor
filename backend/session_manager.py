@@ -3,16 +3,14 @@ import json
 import uuid
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
+from data_paths import LOGS_DIR
 from screenshot import take_screenshot
 from vision_judge import judge_screenshot, evaluate_dispute
 from blocker_window import blocker
 
 
-LOGS_DIR = Path(__file__).parent.parent / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOGS_DIR / "session_logs.jsonl"
 MEMORY_FILE = LOGS_DIR / "dispute_memory.json"
 
@@ -194,6 +192,7 @@ class SessionManager:
                     "confidence": result.get("confidence", 0),
                     "current_activity": result.get("current_activity", ""),
                     "reason": result.get("reason", ""),
+                    "model": result.get("model", ""),
                     "screenshot_path": screenshot_path,
                 }
                 self.logs.append(log_entry)

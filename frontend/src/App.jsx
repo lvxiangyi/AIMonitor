@@ -2,14 +2,15 @@ import { useState, useEffect, useRef } from 'react'
 import {
   startSession, stopSession, getStatus,
   getSchedules, addSchedule, deleteSchedule,
-  getAnalytics, getWrongAnswers, testBlock
+  getAnalytics, getWrongAnswers, testBlock,
+  getSettings, saveSettings
 } from './api'
 
 function App() {
   const [tab, setTab] = useState('session')
   const [task, setTask] = useState('')
-  const [duration, setDuration] = useState(10)
-  const [interval, setInterval_] = useState(30)
+  const [duration, setDuration] = useState('10')
+  const [interval, setInterval_] = useState('30')
   const [status, setStatus] = useState(null)
   const [sessionId, setSessionId] = useState(null)
   const [isRunning, setIsRunning] = useState(false)
@@ -19,10 +20,14 @@ function App() {
   const [schedTask, setSchedTask] = useState('')
   const [schedDate, setSchedDate] = useState('')
   const [schedTime, setSchedTime] = useState('')
-  const [schedDuration, setSchedDuration] = useState(25)
+  const [schedDuration, setSchedDuration] = useState('25')
 
   const [analytics, setAnalytics] = useState(null)
   const [wrongAnswers, setWrongAnswers] = useState([])
+  const [settings, setSettings] = useState(null)
+  const [modelOptions, setModelOptions] = useState([])
+  const [selectedModel, setSelectedModel] = useState('')
+  const [settingsStatus, setSettingsStatus] = useState('')
 
   useEffect(() => {
     if (isRunning) {
@@ -52,9 +57,44 @@ function App() {
     }
   }, [tab])
 
+  useEffect(() => {
+    if (tab === 'settings') {
+      getSettings()
+        .then((d) => {
+          setSettings(d.settings)
+          setModelOptions(d.model_options || [])
+          setSelectedModel(d.settings?.model || '')
+          setSettingsStatus('')
+        })
+        .catch(() => setSettingsStatus('設定を読み込めません'))
+    }
+  }, [tab])
+
+  const parsePositiveInt = (value, min) => {
+    if (value === '') return null
+    const n = Number(value)
+    return Number.isInteger(n) && n >= min ? n : null
+  }
+
   const handleStart = async () => {
     try {
-      const res = await startSession(task, duration, interval)
+      const durationMinutes = parsePositiveInt(duration, 1)
+      const checkIntervalSeconds = parsePositiveInt(interval, 5)
+
+      if (!task.trim()) {
+        alert('学習目標を入力してください')
+        return
+      }
+      if (durationMinutes === null) {
+        alert('学習時間は1分以上の整数で入力してください')
+        return
+      }
+      if (checkIntervalSeconds === null) {
+        alert('チェック間隔は5秒以上の整数で入力してください')
+        return
+      }
+
+      const res = await startSession(task.trim(), durationMinutes, checkIntervalSeconds)
       setSessionId(res.session_id)
       setIsRunning(true)
     } catch (e) {
@@ -70,7 +110,13 @@ function App() {
 
   const handleAddSchedule = async () => {
     if (!schedTask || !schedDate || !schedTime) return
-    await addSchedule(schedTask, schedDate, schedTime, schedDuration, 30)
+    const durationMinutes = parsePositiveInt(schedDuration, 5)
+    if (durationMinutes === null) {
+      alert('時間は5分以上の整数で入力してください')
+      return
+    }
+
+    await addSchedule(schedTask, schedDate, schedTime, durationMinutes, 30)
     const d = await getSchedules()
     setSchedules(d.schedules || [])
     setSchedTask('')
@@ -86,8 +132,8 @@ function App() {
 
   const handleStartFromSchedule = (sched) => {
     setTask(sched.task)
-    setDuration(sched.duration_minutes)
-    setInterval_(sched.check_interval_seconds)
+    setDuration(String(sched.duration_minutes))
+    setInterval_(String(sched.check_interval_seconds))
     setTab('session')
   }
 
@@ -102,6 +148,18 @@ function App() {
     if (!status || !status.active) return '待機中'
     if (!status.latest_judgement) return '初回チェック待ち...'
     return status.latest_judgement.on_task ? '✅ 集中' : '❌ 気が散っている'
+  }
+
+  const handleSaveSettings = async () => {
+    if (!selectedModel) return
+    setSettingsStatus('保存中...')
+    try {
+      const res = await saveSettings(selectedModel)
+      setSettings(res.settings)
+      setSettingsStatus('保存しました。次のAI判定から反映されます。')
+    } catch (e) {
+      setSettingsStatus('保存できませんでした')
+    }
   }
 
   return (
@@ -121,6 +179,9 @@ function App() {
         <button className={tab === 'analytics' ? 'tab active' : 'tab'} onClick={() => setTab('analytics')}>
           📊 レポート
         </button>
+        <button className={tab === 'settings' ? 'tab active' : 'tab'} onClick={() => setTab('settings')}>
+          ⚙️ 設定
+        </button>
       </nav>
 
       {tab === 'session' && (
@@ -135,11 +196,11 @@ function App() {
               <div className="input-row">
                 <div className="input-group">
                   <label>学習時間（分）</label>
-                  <input type="number" value={duration} onChange={(e) => setDuration(Number(e.target.value))} min="1" />
+                  <input type="number" value={duration} onChange={(e) => setDuration(e.target.value)} min="1" step="1" />
                 </div>
                 <div className="input-group">
                   <label>チェック間隔（秒）</label>
-                  <input type="number" value={interval} onChange={(e) => setInterval_(Number(e.target.value))} min="5" />
+                  <input type="number" value={interval} onChange={(e) => setInterval_(e.target.value)} min="5" step="1" />
                 </div>
               </div>
               <button className="btn-start" onClick={handleStart}>▶️ 監督を開始</button>
@@ -189,6 +250,7 @@ function App() {
                     <div className="log-details">
                       <span className="log-activity">{log.current_activity}</span>
                       <span className="log-reason">{log.reason}</span>
+                      {log.model && <span className="log-model">{log.model}</span>}
                     </div>
                     <div className="log-confidence">{Math.round(log.confidence * 100)}%</div>
                   </div>
@@ -219,7 +281,7 @@ function App() {
               </div>
               <div className="input-group">
                 <label>時間（分）</label>
-                <input type="number" value={schedDuration} onChange={(e) => setSchedDuration(Number(e.target.value))} min="5" />
+                <input type="number" value={schedDuration} onChange={(e) => setSchedDuration(e.target.value)} min="5" step="1" />
               </div>
             </div>
             <button className="btn-start" onClick={handleAddSchedule}>➕ スケジュールに追加</button>
@@ -334,6 +396,40 @@ function App() {
           )}
 
           {!analytics && <p className="empty-msg">データがまだありません。セッションを開始してください。</p>}
+        </section>
+      )}
+
+      {tab === 'settings' && (
+        <section className="settings-panel">
+          <h2>⚙️ 設定</h2>
+
+          <div className="input-group">
+            <label>AIモデル</label>
+            <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+              {modelOptions.map((model) => (
+                <option key={model.id} value={model.id}>{model.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="model-list">
+            {modelOptions.map((model) => (
+              <button
+                key={model.id}
+                type="button"
+                className={selectedModel === model.id ? 'model-option selected' : 'model-option'}
+                onClick={() => setSelectedModel(model.id)}
+              >
+                <span className="model-name">{model.label}</span>
+                <span className="model-id">{model.id}</span>
+                <span className="model-description">{model.description}</span>
+              </button>
+            ))}
+          </div>
+
+          <button className="btn-start" onClick={handleSaveSettings}>保存</button>
+          {settingsStatus && <p className="settings-status">{settingsStatus}</p>}
+          {settings?.model && <p className="settings-current">現在: {settings.model}</p>}
         </section>
       )}
     </div>

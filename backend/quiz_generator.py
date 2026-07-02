@@ -7,16 +7,16 @@ Wrong answers are recorded for review.
 import os
 import json
 import random
-from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
+from data_paths import LOGS_DIR
+from settings_manager import get_selected_model
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-LOGS_DIR = Path(__file__).parent.parent / "logs"
 WRONG_ANSWERS_FILE = LOGS_DIR / "wrong_answers.json"
 
 QUIZ_PROMPT = """You are a quiz generator for a study assistant app.
@@ -135,9 +135,11 @@ def generate_quiz(task: str) -> dict:
 
     try:
         client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
+        model = get_selected_model()
+        print(f"[quiz_generator] Using model: {model}")
 
         response = client.chat.completions.create(
-            model="openai/gpt-4o-mini",
+            model=model,
             messages=[
                 {"role": "user", "content": QUIZ_PROMPT.format(task=task)}
             ],

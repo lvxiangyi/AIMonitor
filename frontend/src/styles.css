@@ -56,11 +56,16 @@ header h1 { font-size: 1.8rem; color: #fff; margin-bottom: 4px; }
 .tab:hover:not(.active) { color: #ccc; }
 
 /* Controls */
-.controls, .schedule-panel, .analytics-panel {
+.controls, .schedule-panel, .analytics-panel, .settings-panel {
   background: #1a1a2e;
   border-radius: 16px;
   padding: 28px;
   border: 1px solid #2a2a4a;
+}
+
+.settings-panel h2 {
+  margin-bottom: 18px;
+  font-size: 1.1rem;
 }
 
 .input-group { margin-bottom: 16px; }
@@ -157,6 +162,7 @@ header h1 { font-size: 1.8rem; color: #fff; margin-bottom: 4px; }
 .log-details { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .log-activity { font-weight: 500; font-size: 0.85rem; }
 .log-reason { font-size: 0.75rem; color: #888; }
+.log-model { font-size: 0.7rem; color: #4a9eff; font-family: 'Courier New', monospace; }
 .log-confidence { font-size: 0.75rem; color: #4a9eff; font-weight: 600; }
 
 /* Schedule */
@@ -322,4 +328,56 @@ header h1 { font-size: 1.8rem; color: #fff; margin-bottom: 4px; }
 
 .btn-test:hover {
   background: rgba(231, 76, 60, 0.1);
+}
+
+/* Settings */
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.model-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #2a2a4a;
+  border-radius: 10px;
+  background: #0f0f23;
+  color: #e0e0e0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.model-option.selected {
+  border-color: #4a9eff;
+  background: #17233d;
+}
+
+.model-name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.model-id {
+  font-family: 'Courier New', monospace;
+  font-size: 0.75rem;
+  color: #4a9eff;
+}
+
+.model-description {
+  font-size: 0.8rem;
+  color: #aaa;
+}
+
+.settings-status,
+.settings-current {
+  margin-top: 10px;
+  color: #aaa;
+  font-size: 0.85rem;
+  text-align: center;
 }

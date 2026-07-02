@@ -2,7 +2,94 @@
 
 AI 学习监督助手 — 通过屏幕理解用户行为，在分心时主动干预。
 
-## 快速启动
+## Run as a Windows desktop app
+
+This is the recommended workflow for daily personal use on Windows.
+
+### First-time setup
+
+Double-click:
+
+```bat
+setup_windows.bat
+```
+
+This creates `backend/.venv`, installs backend dependencies, installs frontend dependencies, builds `frontend/dist`, and installs Electron dependencies.
+
+### Daily stable use
+
+Double-click:
+
+```bat
+start_stable.bat
+```
+
+Stable mode opens the Electron desktop window, starts the FastAPI backend automatically with `backend/.venv/Scripts/python.exe`, and loads the already-built `frontend/dist/index.html`. It does not require or start the Vite frontend dev server.
+
+### Rebuild frontend after frontend changes
+
+Only when you change frontend code, run:
+
+```bat
+build_frontend.bat
+```
+
+Then use `start_stable.bat` again.
+
+### Development mode
+
+For active development, run:
+
+```bat
+start_dev.bat
+```
+
+This opens the reload backend on `127.0.0.1:8000` and the Vite frontend dev server on `127.0.0.1:3000` in separate terminals.
+
+To also open Electron against those dev servers:
+
+```bat
+start_dev.bat electron
+```
+
+Use `start_stable.bat` for daily planning/focus monitoring. Use `start_dev.bat` only when developing.
+
+### Windows auto-start
+
+1. Press Win + R
+2. Type `shell:startup`
+3. Create a shortcut to `start_stable.bat`
+4. Move the shortcut into that folder
+
+### Data safety
+
+Stable mode uses `data/prod/` for logs, schedules, quiz history, and screenshots. Dev mode uses `data/dev/`. Avoid directly modifying stable user data during risky development, and back up local data before database schema or data format changes.
+
+### Multi-monitor screenshots
+
+By default, FocusGuard captures only the display that currently contains the mouse cursor. This avoids sending both monitors to the vision model when a second screen has unrelated content.
+
+To temporarily return to full virtual-screen capture, start the backend/Electron with:
+
+```bat
+set AIMONITOR_SCREENSHOT_MODE=full
+```
+
+### AI model settings
+
+The default model is `google/gemini-2.5-flash-lite`. You can change the model from the Settings tab in the desktop app. The selected model is saved in:
+
+```text
+data/prod/settings.json
+```
+
+Current built-in options:
+
+- `google/gemini-2.5-flash-lite`
+- `openai/gpt-4o`
+- `openai/gpt-4o-mini`
+
+## 快速启动（开发）
 
 ### 1. 后端
 
@@ -26,8 +113,8 @@ npm run dev
 
 编辑根目录 `.env` 文件：
 
-```
-OPENAI_API_KEY=sk-your-real-key-here
+```env
+OPENROUTER_API_KEY=sk-or-your-real-key-here
 ```
 
 如果不配置，系统自动使用 mock 模式（随机返回专注/分心结果，方便调试）。
