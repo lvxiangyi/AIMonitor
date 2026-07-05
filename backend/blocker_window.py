@@ -13,6 +13,7 @@ import ctypes
 from ctypes import wintypes
 
 BACKEND_URL = "http://127.0.0.1:" + os.environ.get("FOCUSGUARD_PORT", "8899")
+UI_SCALE = 2.0
 
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
@@ -110,6 +111,26 @@ def _content_position(window_rect, monitor_rect):
     )
 
 
+def _s(value):
+    return int(round(value * UI_SCALE))
+
+
+def _clamp_dialog_size(monitor_rect, width, height, max_fraction=0.92):
+    _, _, monitor_width, monitor_height = monitor_rect
+    max_width = int(monitor_width * max_fraction)
+    max_height = int(monitor_height * max_fraction)
+    return min(width, max_width), min(height, max_height)
+
+
+def _raise_window(root):
+    try:
+        hwnd = wintypes.HWND(root.winfo_id())
+        ctypes.windll.user32.FlashWindow(hwnd, True)
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
 def _force_window_rect(root, rect, activate=True):
     left, top, width, height = rect
     root.geometry(f"{width}x{height}+{left}+{top}")
@@ -194,15 +215,14 @@ class BlockerWindow:
 
     def show_flow_prompt(self, summary: dict):
         """Ask the user what to do after a completed work block."""
-        if self._is_showing:
-            return
+        from flow_prompt_store import save_pending_flow
+
+        save_pending_flow(summary)
         self._is_showing = True
         self._command_queue.put(lambda: self._do_show_flow_prompt(summary))
 
     def show_resume_prompt(self, payload: dict):
         """Ask the user to confirm returning to work after a break."""
-        if self._is_showing:
-            return
         self._is_showing = True
         self._command_queue.put(lambda: self._do_show_resume_prompt(payload))
 
@@ -291,14 +311,15 @@ class BlockerWindow:
     def _do_show_flow_prompt(self, summary):
         """Render post-block options (runs on tk thread)."""
         self._clear_content()
-        width = 680
-        height = 560
-        rect = _centered_rect(_cursor_monitor_rect(), width, height)
+        monitor_rect = _cursor_monitor_rect()
+        width, height = _clamp_dialog_size(monitor_rect, _s(680), _s(560))
+        rect = _centered_rect(monitor_rect, width, height)
         _force_window_rect(self._root, rect)
         self._root.deiconify()
         self._root.attributes("-topmost", True)
         self._root.lift()
         self._root.focus_force()
+        _raise_window(self._root)
         self._grab_modal()
 
         frame = self._content_frame
@@ -315,88 +336,117 @@ class BlockerWindow:
         tk.Label(
             frame,
             text="Block 已结束",
-            font=("Segoe UI", 22, "bold"),
+            font=("Segoe UI", _s(22), "bold"),
             fg="#ffffff",
             bg="#0f0f23",
-        ).pack(pady=(0, 8))
+        ).pack(pady=(0, _s(8)))
         tk.Label(
             frame,
             text=f"{task}\n专注 {focus_minutes} 分钟，分心 {distracted} 次，AI 错误 {api_errors} 次。",
-            font=("Segoe UI", 11),
+            font=("Segoe UI", _s(11)),
             fg="#cbd5e1",
             bg="#0f0f23",
-            wraplength=600,
+            wraplength=_s(600),
             justify="center",
-        ).pack(pady=(0, 16))
+        ).pack(pady=(0, _s(16)))
 
-        error_label = tk.Label(frame, text="", font=("Segoe UI", 10), fg="#ff8a80", bg="#0f0f23", wraplength=560)
-        error_label.pack(pady=(0, 8))
+        error_label = tk.Label(
+            frame, text="", font=("Segoe UI", _s(10)), fg="#ff8a80", bg="#0f0f23", wraplength=_s(560)
+        )
+        error_label.pack(pady=(0, _s(8)))
 
-        continue_box = tk.Frame(frame, bg="#15172a", padx=14, pady=12)
-        continue_box.pack(fill="x", pady=(0, 8))
-        tk.Label(continue_box, text="1. 继续任务", font=("Segoe UI", 12, "bold"), fg="#ffffff", bg="#15172a").pack(anchor="w")
-        continue_task = tk.Entry(continue_box, font=("Segoe UI", 11), width=48, bg="#0f0f23", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+        continue_box = tk.Frame(frame, bg="#15172a", padx=_s(14), pady=_s(12))
+        continue_box.pack(fill="x", pady=(0, _s(8)))
+        tk.Label(
+            continue_box, text="1. 继续任务", font=("Segoe UI", _s(12), "bold"), fg="#ffffff", bg="#15172a"
+        ).pack(anchor="w")
+        continue_task = tk.Entry(
+            continue_box, font=("Segoe UI", _s(11)), width=_s(48), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
         continue_task.insert(0, task)
-        continue_task.pack(fill="x", pady=(8, 8))
+        continue_task.pack(fill="x", pady=(_s(8), _s(8)))
         duration_row = tk.Frame(continue_box, bg="#15172a")
         duration_row.pack(fill="x")
-        tk.Label(duration_row, text="下一轮分钟", font=("Segoe UI", 10), fg="#cbd5e1", bg="#15172a").pack(side="left")
-        continue_duration = tk.Entry(duration_row, font=("Segoe UI", 10), width=8, bg="#0f0f23", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+        tk.Label(
+            duration_row, text="下一轮分钟", font=("Segoe UI", _s(10)), fg="#cbd5e1", bg="#15172a"
+        ).pack(side="left")
+        continue_duration = tk.Entry(
+            duration_row, font=("Segoe UI", _s(10)), width=_s(8), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
         continue_duration.insert(0, str(duration))
-        continue_duration.pack(side="left", padx=(8, 12))
+        continue_duration.pack(side="left", padx=(_s(8), _s(12)))
         tk.Button(
             duration_row,
             text="开始下一轮",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", _s(10), "bold"),
             fg="#ffffff",
             bg="#2ecc71",
             relief="flat",
-            padx=14,
-            pady=5,
+            padx=_s(14),
+            pady=_s(5),
             cursor="hand2",
             command=lambda: self._submit_continue(continue_task, continue_duration, interval, error_label),
         ).pack(side="right")
 
-        break_box = tk.Frame(frame, bg="#15172a", padx=14, pady=12)
-        break_box.pack(fill="x", pady=(0, 8))
-        tk.Label(break_box, text="2. 休息一下", font=("Segoe UI", 12, "bold"), fg="#ffffff", bg="#15172a").pack(anchor="w")
+        break_box = tk.Frame(frame, bg="#15172a", padx=_s(14), pady=_s(12))
+        break_box.pack(fill="x", pady=(0, _s(8)))
+        tk.Label(
+            break_box, text="2. 休息一下", font=("Segoe UI", _s(12), "bold"), fg="#ffffff", bg="#15172a"
+        ).pack(anchor="w")
         break_row = tk.Frame(break_box, bg="#15172a")
-        break_row.pack(fill="x", pady=(8, 8))
-        tk.Label(break_row, text="休息分钟", font=("Segoe UI", 10), fg="#cbd5e1", bg="#15172a").pack(side="left")
-        break_minutes = tk.Entry(break_row, font=("Segoe UI", 10), width=8, bg="#0f0f23", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+        break_row.pack(fill="x", pady=(_s(8), _s(8)))
+        tk.Label(
+            break_row, text="休息分钟", font=("Segoe UI", _s(10)), fg="#cbd5e1", bg="#15172a"
+        ).pack(side="left")
+        break_minutes = tk.Entry(
+            break_row, font=("Segoe UI", _s(10)), width=_s(8), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
         break_minutes.insert(0, "10")
-        break_minutes.pack(side="left", padx=(8, 12))
-        break_activity = tk.Entry(break_box, font=("Segoe UI", 11), width=48, bg="#0f0f23", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+        break_minutes.pack(side="left", padx=(_s(8), _s(12)))
+        break_activity = tk.Entry(
+            break_box, font=("Segoe UI", _s(11)), width=_s(48), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
         break_activity.insert(0, "散步 / 喝水 / 放松")
-        break_activity.pack(fill="x", pady=(0, 8))
+        break_activity.pack(fill="x", pady=(0, _s(8)))
         tk.Button(
             break_box,
             text="开始休息",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", _s(10), "bold"),
             fg="#ffffff",
             bg="#4a9eff",
             relief="flat",
-            padx=14,
-            pady=5,
+            padx=_s(14),
+            pady=_s(5),
             cursor="hand2",
-            command=lambda: self._submit_break(break_minutes, break_activity, task, duration, interval, error_label),
+            command=lambda: self._submit_break(
+                break_minutes, break_activity, task, duration, interval, error_label
+            ),
         ).pack(anchor="e")
 
-        pause_box = tk.Frame(frame, bg="#15172a", padx=14, pady=12)
+        pause_box = tk.Frame(frame, bg="#15172a", padx=_s(14), pady=_s(12))
         pause_box.pack(fill="x")
-        tk.Label(pause_box, text="3. 暂停今天的学习", font=("Segoe UI", 12, "bold"), fg="#ffffff", bg="#15172a").pack(anchor="w")
-        pause_activity = tk.Entry(pause_box, font=("Segoe UI", 11), width=48, bg="#0f0f23", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+        tk.Label(
+            pause_box, text="3. 暂停今天的学习", font=("Segoe UI", _s(12), "bold"), fg="#ffffff", bg="#15172a"
+        ).pack(anchor="w")
+        pause_activity = tk.Entry(
+            pause_box, font=("Segoe UI", _s(11)), width=_s(48), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
         pause_activity.insert(0, "接下来要做的活动")
-        pause_activity.pack(fill="x", pady=(8, 8))
+        pause_activity.pack(fill="x", pady=(_s(8), _s(8)))
         tk.Button(
             pause_box,
             text="记录并暂停",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", _s(10), "bold"),
             fg="#ffffff",
             bg="#e74c3c",
             relief="flat",
-            padx=14,
-            pady=5,
+            padx=_s(14),
+            pady=_s(5),
             cursor="hand2",
             command=lambda: self._submit_pause_day(pause_activity, error_label),
         ).pack(anchor="e")
@@ -404,14 +454,15 @@ class BlockerWindow:
     def _do_show_resume_prompt(self, payload):
         """Render break-finished confirmation (runs on tk thread)."""
         self._clear_content()
-        width = 560
-        height = 320
-        rect = _centered_rect(_cursor_monitor_rect(), width, height)
+        monitor_rect = _cursor_monitor_rect()
+        width, height = _clamp_dialog_size(monitor_rect, _s(560), _s(320))
+        rect = _centered_rect(monitor_rect, width, height)
         _force_window_rect(self._root, rect)
         self._root.deiconify()
         self._root.attributes("-topmost", True)
         self._root.lift()
         self._root.focus_force()
+        _raise_window(self._root)
         self._grab_modal()
 
         frame = self._content_frame
@@ -420,28 +471,32 @@ class BlockerWindow:
 
         task = payload.get("task", "")
         activity = payload.get("activity", "")
-        error_label = tk.Label(frame, text="", font=("Segoe UI", 10), fg="#ff8a80", bg="#0f0f23", wraplength=500)
+        error_label = tk.Label(
+            frame, text="", font=("Segoe UI", _s(10)), fg="#ff8a80", bg="#0f0f23", wraplength=_s(500)
+        )
 
-        tk.Label(frame, text="休息结束", font=("Segoe UI", 22, "bold"), fg="#ffffff", bg="#0f0f23").pack(pady=(0, 10))
+        tk.Label(
+            frame, text="休息结束", font=("Segoe UI", _s(22), "bold"), fg="#ffffff", bg="#0f0f23"
+        ).pack(pady=(0, _s(10)))
         tk.Label(
             frame,
             text=f"刚才休息：{activity}\n准备回到：{task}",
-            font=("Segoe UI", 12),
+            font=("Segoe UI", _s(12)),
             fg="#cbd5e1",
             bg="#0f0f23",
-            wraplength=500,
+            wraplength=_s(500),
             justify="center",
-        ).pack(pady=(0, 16))
-        error_label.pack(pady=(0, 8))
+        ).pack(pady=(0, _s(16)))
+        error_label.pack(pady=(0, _s(8)))
         tk.Button(
             frame,
             text="确认，开始下一轮",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", _s(12), "bold"),
             fg="#ffffff",
             bg="#2ecc71",
             relief="flat",
-            padx=24,
-            pady=8,
+            padx=_s(24),
+            pady=_s(8),
             cursor="hand2",
             command=lambda: self._post_flow("/flow/resume", payload, error_label),
         ).pack()
@@ -500,6 +555,9 @@ class BlockerWindow:
             res = requests.post(f"{BACKEND_URL}{path}", json=payload, timeout=10)
             if res.status_code >= 400:
                 raise RuntimeError(res.text)
+            from flow_prompt_store import clear_pending_flow
+
+            clear_pending_flow()
             self._command_queue.put(self._message_dismiss)
         except Exception as e:
             self._command_queue.put(lambda: error_label.config(text=f"操作失败：{e}"))

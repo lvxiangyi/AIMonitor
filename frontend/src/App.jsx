@@ -14,6 +14,9 @@ function todayString() {
   return `${y}-${m}-${d}`
 }
 
+const IDLE_STATUS_POLL_MS = 15000
+const ACTIVE_STATUS_POLL_MS = 30000
+
 function App() {
   const [tab, setTab] = useState('session')
   const [task, setTask] = useState('')
@@ -22,8 +25,11 @@ function App() {
   const [status, setStatus] = useState(null)
   const [sessionId, setSessionId] = useState(null)
   const [isRunning, setIsRunning] = useState(false)
+  const [remainingSeconds, setRemainingSeconds] = useState(0)
   const [formError, setFormError] = useState('')
   const taskRef = useRef(null)
+  const sessionEndsAtRef = useRef(0)
+  const completionCheckedRef = useRef(false)
 
   const [aiStatus, setAiStatus] = useState(null)
   const [schedules, setSchedules] = useState([])
@@ -40,21 +46,54 @@ function App() {
   const [selectedModel, setSelectedModel] = useState('')
   const [settingsStatus, setSettingsStatus] = useState('')
 
+  const applySessionStatus = (s) => {
+    setStatus(s)
+    setSessionId(s.session_id || null)
+    const active = Boolean(s.active)
+    setIsRunning(active)
+    if (active && typeof s.remaining_seconds === 'number') {
+      sessionEndsAtRef.current = Date.now() + s.remaining_seconds * 1000
+      setRemainingSeconds(s.remaining_seconds)
+      completionCheckedRef.current = false
+    }
+  }
+
   useEffect(() => {
     const poll = async () => {
       try {
-        const s = await getStatus()
-        setStatus(s)
-        setSessionId(s.session_id || null)
-        setIsRunning(Boolean(s.active))
+        applySessionStatus(await getStatus())
       } catch (e) {
         // Backend may still be starting.
       }
     }
     poll()
-    const id = window.setInterval(poll, 3000)
+    const intervalMs = isRunning ? ACTIVE_STATUS_POLL_MS : IDLE_STATUS_POLL_MS
+    const id = window.setInterval(poll, intervalMs)
     return () => window.clearInterval(id)
-  }, [])
+  }, [isRunning])
+
+  useEffect(() => {
+    if (!isRunning) {
+      completionCheckedRef.current = false
+      setRemainingSeconds(0)
+      return
+    }
+
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((sessionEndsAtRef.current - Date.now()) / 1000))
+      setRemainingSeconds(left)
+      if (left <= 0 && !completionCheckedRef.current) {
+        completionCheckedRef.current = true
+        getStatus()
+          .then((s) => applySessionStatus(s))
+          .catch(() => {})
+      }
+    }
+
+    tick()
+    const id = window.setInterval(tick, 1000)
+    return () => window.clearInterval(id)
+  }, [isRunning])
 
   useEffect(() => {
     const pollAi = async () => {
@@ -142,6 +181,9 @@ function App() {
       const res = await startSession(task.trim(), durationMinutes, checkIntervalSeconds)
       setSessionId(res.session_id)
       setIsRunning(true)
+      sessionEndsAtRef.current = Date.now() + durationMinutes * 60 * 1000
+      setRemainingSeconds(durationMinutes * 60)
+      completionCheckedRef.current = false
     } catch (e) {
       setFormError(e.message || '无法启动监督。')
     }
@@ -150,6 +192,8 @@ function App() {
   const handleStop = async () => {
     await stopSession(sessionId)
     setIsRunning(false)
+    setRemainingSeconds(0)
+    sessionEndsAtRef.current = 0
     await refreshReport()
   }
 
@@ -269,7 +313,7 @@ function App() {
               <div className="status-info">
                 <div className="info-item"><span className="label">任务</span><span className="value">{status?.task || task}</span></div>
                 <div className="info-item"><span className="label">来源</span><span className="value">{status?.source === 'schedule' ? 'Schedule' : '手动'}</span></div>
-                <div className="info-item"><span className="label">剩余时间</span><span className="value timer">{formatTime(status?.remaining_seconds)}</span></div>
+                <div className="info-item"><span className="label">剩余时间</span><span className="value timer">{formatTime(remainingSeconds)}</span></div>
                 <div className="info-item"><span className="label">当前活动</span><span className="value">{status?.latest_judgement?.current_activity || '等待检查...'}</span></div>
                 <div className="info-item"><span className="label">AI 理由</span><span className="value">{statusText}</span></div>
                 <div className="info-item"><span className="label">连续分心</span><span className={`value ${status?.off_task_streak >= 2 ? 'danger' : ''}`}>{status?.off_task_streak ?? 0}</span></div>

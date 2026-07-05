@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
+import asyncio
 import json
 
 from data_paths import LOGS_DIR
@@ -28,6 +29,18 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     auto_scheduler.start()
+    asyncio.create_task(_replay_pending_flow_prompt())
+
+
+async def _replay_pending_flow_prompt():
+    """Show a saved post-session prompt if the previous attempt was missed."""
+    await asyncio.sleep(1.0)
+    from flow_prompt_store import load_pending_flow
+    from blocker_window import blocker
+
+    pending = load_pending_flow()
+    if pending:
+        blocker.show_flow_prompt(pending)
 
 
 @app.on_event("shutdown")

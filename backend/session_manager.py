@@ -122,7 +122,6 @@ class SessionManager:
 
         self.active = False
         self.should_block = False
-        blocker.dismiss()
 
         actual_start = datetime.fromtimestamp(self.start_time).isoformat() if self.start_time else None
         actual_end = datetime.now().isoformat()
@@ -175,6 +174,8 @@ class SessionManager:
                 })
             except Exception as e:
                 print(f"[session] End notification error (non-fatal): {e}")
+        else:
+            blocker.dismiss()
 
     def acknowledge_block(self):
         """User acknowledged the block overlay."""
