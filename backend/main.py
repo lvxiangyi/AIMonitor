@@ -7,6 +7,10 @@ import json
 from data_paths import LOGS_DIR
 from session_manager import session_manager
 from schedule_manager import add_schedule, get_schedules, delete_schedule
+from auto_scheduler import auto_scheduler
+from ai_status_manager import get_ai_status
+from report_manager import get_daily_report
+from flow_manager import flow_manager
 from quiz_generator import generate_quiz, record_wrong_answer, get_wrong_answers
 from settings_manager import get_settings_payload, save_settings
 
@@ -19,6 +23,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    auto_scheduler.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    auto_scheduler.stop()
 
 # --- Session APIs ---
 
@@ -45,13 +59,44 @@ class SettingsRequest(BaseModel):
     model: str
 
 
+class FlowContinueRequest(BaseModel):
+    task: str
+    duration_minutes: int
+    check_interval_seconds: int = 30
+
+
+class FlowBreakRequest(BaseModel):
+    break_minutes: int
+    activity: str
+    task: str
+    duration_minutes: int
+    check_interval_seconds: int = 30
+
+
+class FlowPauseDayRequest(BaseModel):
+    activity: str
+
+
+class FlowResumeRequest(BaseModel):
+    break_id: Optional[str] = None
+    task: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    check_interval_seconds: Optional[int] = None
+    activity: Optional[str] = None
+    break_minutes: Optional[int] = None
+    started_at: Optional[str] = None
+
+
 @app.post("/session/start")
 async def start_session(req: StartSessionRequest):
-    session_id = session_manager.start_session(
-        task=req.task,
-        duration_minutes=req.duration_minutes,
-        check_interval_seconds=req.check_interval_seconds,
-    )
+    try:
+        session_id = session_manager.start_session(
+            task=req.task,
+            duration_minutes=req.duration_minutes,
+            check_interval_seconds=req.check_interval_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"session_id": session_id, "status": "started"}
 
 
@@ -78,6 +123,58 @@ async def dispute_judgement(req: DisputeRequest):
     return result
 
 
+# --- Flow Schedule APIs ---
+
+@app.post("/flow/continue")
+async def api_flow_continue(req: FlowContinueRequest):
+    try:
+        session_id = flow_manager.continue_work(
+            task=req.task,
+            duration_minutes=req.duration_minutes,
+            check_interval_seconds=req.check_interval_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "started", "session_id": session_id}
+
+
+@app.post("/flow/break")
+async def api_flow_break(req: FlowBreakRequest):
+    if req.break_minutes <= 0:
+        raise HTTPException(status_code=400, detail="Break minutes must be greater than 0.")
+    if not req.activity.strip():
+        raise HTTPException(status_code=400, detail="Activity is required.")
+    if not req.task.strip():
+        raise HTTPException(status_code=400, detail="Task is required.")
+    flow_manager.start_break(
+        break_minutes=req.break_minutes,
+        activity=req.activity.strip(),
+        task=req.task.strip(),
+        duration_minutes=req.duration_minutes,
+        check_interval_seconds=req.check_interval_seconds,
+    )
+    return {"status": "break_started"}
+
+
+@app.post("/flow/resume")
+async def api_flow_resume(req: FlowResumeRequest):
+    payload = req.dict(exclude_none=True) if req.task else None
+    try:
+        session_id = flow_manager.resume_after_break(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "started", "session_id": session_id}
+
+
+@app.post("/flow/pause-day")
+async def api_flow_pause_day(req: FlowPauseDayRequest):
+    activity = req.activity.strip()
+    if not activity:
+        raise HTTPException(status_code=400, detail="Activity is required.")
+    flow_manager.pause_day(activity)
+    return {"status": "day_paused"}
+
+
 # --- Settings APIs ---
 
 @app.get("/settings")
@@ -92,6 +189,11 @@ async def api_save_settings(req: SettingsRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"settings": settings, "status": "saved"}
+
+
+@app.get("/ai/status")
+async def api_ai_status():
+    return get_ai_status()
 
 
 # --- Quiz APIs ---
@@ -130,7 +232,8 @@ class ScheduleRequest(BaseModel):
     task: str
     date: str
     start_time: str
-    duration_minutes: int
+    end_time: Optional[str] = None
+    duration_minutes: Optional[int] = None
     check_interval_seconds: int = 30
 
 
@@ -145,13 +248,17 @@ async def api_list_schedules():
 
 @app.post("/schedule/add")
 async def api_add_schedule(req: ScheduleRequest):
-    entry = add_schedule(
-        task=req.task,
-        date=req.date,
-        start_time=req.start_time,
-        duration_minutes=req.duration_minutes,
-        check_interval_seconds=req.check_interval_seconds,
-    )
+    try:
+        entry = add_schedule(
+            task=req.task,
+            date=req.date,
+            start_time=req.start_time,
+            end_time=req.end_time,
+            duration_minutes=req.duration_minutes,
+            check_interval_seconds=req.check_interval_seconds,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"status": "added", "schedule": entry}
 
 
@@ -159,6 +266,11 @@ async def api_add_schedule(req: ScheduleRequest):
 async def api_delete_schedule(req: DeleteScheduleRequest):
     success = delete_schedule(req.schedule_id)
     return {"status": "deleted" if success else "not_found"}
+
+
+@app.get("/report/daily")
+async def api_daily_report(date: Optional[str] = None):
+    return get_daily_report(date)
 
 
 # --- Analytics / Visualization APIs ---

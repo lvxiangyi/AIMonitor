@@ -2,60 +2,86 @@ import { useState, useEffect, useRef } from 'react'
 import {
   startSession, stopSession, getStatus,
   getSchedules, addSchedule, deleteSchedule,
-  getAnalytics, getWrongAnswers, testBlock,
-  getSettings, saveSettings
+  getDailyReport, testBlock,
+  getSettings, saveSettings, getAiStatus
 } from './api'
+
+function todayString() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
 
 function App() {
   const [tab, setTab] = useState('session')
   const [task, setTask] = useState('')
-  const [duration, setDuration] = useState('10')
+  const [duration, setDuration] = useState('30')
   const [interval, setInterval_] = useState('30')
   const [status, setStatus] = useState(null)
   const [sessionId, setSessionId] = useState(null)
   const [isRunning, setIsRunning] = useState(false)
-  const pollRef = useRef(null)
+  const [formError, setFormError] = useState('')
+  const taskRef = useRef(null)
 
+  const [aiStatus, setAiStatus] = useState(null)
   const [schedules, setSchedules] = useState([])
   const [schedTask, setSchedTask] = useState('')
-  const [schedDate, setSchedDate] = useState('')
-  const [schedTime, setSchedTime] = useState('')
-  const [schedDuration, setSchedDuration] = useState('25')
+  const [schedDate, setSchedDate] = useState(todayString())
+  const [schedStart, setSchedStart] = useState('')
+  const [schedEnd, setSchedEnd] = useState('')
+  const [scheduleError, setScheduleError] = useState('')
 
-  const [analytics, setAnalytics] = useState(null)
-  const [wrongAnswers, setWrongAnswers] = useState([])
+  const [reportDate, setReportDate] = useState(todayString())
+  const [dailyReport, setDailyReport] = useState(null)
   const [settings, setSettings] = useState(null)
   const [modelOptions, setModelOptions] = useState([])
   const [selectedModel, setSelectedModel] = useState('')
   const [settingsStatus, setSettingsStatus] = useState('')
 
   useEffect(() => {
-    if (isRunning) {
-      const poll = async () => {
-        try {
-          const s = await getStatus()
-          setStatus(s)
-          if (!s.active && isRunning) setIsRunning(false)
-        } catch (e) { /* ignore */ }
+    const poll = async () => {
+      try {
+        const s = await getStatus()
+        setStatus(s)
+        setSessionId(s.session_id || null)
+        setIsRunning(Boolean(s.active))
+      } catch (e) {
+        // Backend may still be starting.
       }
-      poll()
-      pollRef.current = window.setInterval(poll, 3000)
-      return () => window.clearInterval(pollRef.current)
     }
-  }, [isRunning])
+    poll()
+    const id = window.setInterval(poll, 3000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    const pollAi = async () => {
+      try {
+        setAiStatus(await getAiStatus())
+      } catch (e) {
+        setAiStatus({ state: 'error', message: '无法连接后端。' })
+      }
+    }
+    pollAi()
+    const id = window.setInterval(pollAi, 10000)
+    return () => window.clearInterval(id)
+  }, [])
 
   useEffect(() => {
     if (tab === 'schedule') {
-      getSchedules().then(d => setSchedules(d.schedules || [])).catch(() => {})
+      refreshSchedules()
+      const id = window.setInterval(refreshSchedules, 5000)
+      return () => window.clearInterval(id)
     }
   }, [tab])
 
   useEffect(() => {
-    if (tab === 'analytics') {
-      getAnalytics().then(setAnalytics).catch(() => {})
-      getWrongAnswers().then(d => setWrongAnswers(d.wrong_answers || [])).catch(() => {})
+    if (tab === 'report') {
+      refreshReport()
     }
-  }, [tab])
+  }, [tab, reportDate])
 
   useEffect(() => {
     if (tab === 'settings') {
@@ -66,9 +92,26 @@ function App() {
           setSelectedModel(d.settings?.model || '')
           setSettingsStatus('')
         })
-        .catch(() => setSettingsStatus('設定を読み込めません'))
+        .catch(() => setSettingsStatus('设置读取失败'))
     }
   }, [tab])
+
+  const refreshSchedules = async () => {
+    try {
+      const d = await getSchedules()
+      setSchedules(d.schedules || [])
+    } catch (e) {
+      // Keep the last loaded list.
+    }
+  }
+
+  const refreshReport = async () => {
+    try {
+      setDailyReport(await getDailyReport(reportDate))
+    } catch (e) {
+      setDailyReport(null)
+    }
+  }
 
   const parsePositiveInt = (value, min) => {
     if (value === '') return null
@@ -77,64 +120,60 @@ function App() {
   }
 
   const handleStart = async () => {
+    setFormError('')
+    const durationMinutes = parsePositiveInt(duration, 1)
+    const checkIntervalSeconds = parsePositiveInt(interval, 5)
+
+    if (!task.trim()) {
+      setFormError('请输入当前要完成的任务。')
+      taskRef.current?.focus()
+      return
+    }
+    if (durationMinutes === null) {
+      setFormError('工作时长需要是 1 分钟以上的整数。')
+      return
+    }
+    if (checkIntervalSeconds === null) {
+      setFormError('检查间隔需要是 5 秒以上的整数。')
+      return
+    }
+
     try {
-      const durationMinutes = parsePositiveInt(duration, 1)
-      const checkIntervalSeconds = parsePositiveInt(interval, 5)
-
-      if (!task.trim()) {
-        alert('学習目標を入力してください')
-        return
-      }
-      if (durationMinutes === null) {
-        alert('学習時間は1分以上の整数で入力してください')
-        return
-      }
-      if (checkIntervalSeconds === null) {
-        alert('チェック間隔は5秒以上の整数で入力してください')
-        return
-      }
-
       const res = await startSession(task.trim(), durationMinutes, checkIntervalSeconds)
       setSessionId(res.session_id)
       setIsRunning(true)
     } catch (e) {
-      alert('バックエンドに接続できません')
+      setFormError(e.message || '无法启动监督。')
     }
   }
 
   const handleStop = async () => {
     await stopSession(sessionId)
     setIsRunning(false)
-    setStatus(null)
+    await refreshReport()
   }
 
   const handleAddSchedule = async () => {
-    if (!schedTask || !schedDate || !schedTime) return
-    const durationMinutes = parsePositiveInt(schedDuration, 5)
-    if (durationMinutes === null) {
-      alert('時間は5分以上の整数で入力してください')
+    setScheduleError('')
+    if (!schedTask.trim() || !schedDate || !schedStart || !schedEnd) {
+      setScheduleError('请填写任务、日期、开始时间和结束时间。')
       return
     }
 
-    await addSchedule(schedTask, schedDate, schedTime, durationMinutes, 30)
-    const d = await getSchedules()
-    setSchedules(d.schedules || [])
-    setSchedTask('')
-    setSchedDate('')
-    setSchedTime('')
+    try {
+      await addSchedule(schedTask.trim(), schedDate, schedStart, schedEnd, 30)
+      await refreshSchedules()
+      setSchedTask('')
+      setSchedStart('')
+      setSchedEnd('')
+    } catch (e) {
+      setScheduleError(e.message || '无法添加日程。')
+    }
   }
 
   const handleDeleteSchedule = async (id) => {
     await deleteSchedule(id)
-    const d = await getSchedules()
-    setSchedules(d.schedules || [])
-  }
-
-  const handleStartFromSchedule = (sched) => {
-    setTask(sched.task)
-    setDuration(String(sched.duration_minutes))
-    setInterval_(String(sched.check_interval_seconds))
-    setTab('session')
+    await refreshSchedules()
   }
 
   const formatTime = (seconds) => {
@@ -145,9 +184,10 @@ function App() {
   }
 
   const getStatusLabel = () => {
-    if (!status || !status.active) return '待機中'
-    if (!status.latest_judgement) return '初回チェック待ち...'
-    return status.latest_judgement.on_task ? '✅ 集中' : '❌ 気が散っている'
+    if (!status || !status.active) return '待机中'
+    if (!status.latest_judgement) return '等待首次检查'
+    if (status.latest_judgement.judgement_status === 'api_error') return 'AI 未连接'
+    return status.latest_judgement.on_task ? '专注中' : '疑似分心'
   }
 
   const handleSaveSettings = async () => {
@@ -156,103 +196,100 @@ function App() {
     try {
       const res = await saveSettings(selectedModel)
       setSettings(res.settings)
-      setSettingsStatus('保存しました。次のAI判定から反映されます。')
+      setSettingsStatus('已保存，下一次 AI 判定生效。')
+      setAiStatus(await getAiStatus())
     } catch (e) {
-      setSettingsStatus('保存できませんでした')
+      setSettingsStatus(e.message || '保存失败')
     }
+  }
+
+  const aiClass = aiStatus?.state === 'connected' ? 'ok' : aiStatus?.state === 'unknown' ? 'warn' : 'bad'
+  const statusText = status?.latest_judgement?.judgement_status === 'api_error'
+    ? status.latest_judgement.reason
+    : status?.latest_judgement?.reason || '--'
+
+  const statusName = {
+    completed: '已完成',
+    stopped: '手动停止',
+    replaced: '被新任务替换',
+    missed: '已错过',
+    skipped_conflict: '冲突跳过',
+    break: '休息',
+    day_paused: '暂停今日',
   }
 
   return (
     <div className="container">
       <header>
-        <h1>🛡️ FocusGuard Agent</h1>
-        <p className="subtitle">AI学習監督アシスタント</p>
+        <h1>FocusGuard Agent</h1>
+        <p className="subtitle">AI 工作监督助手</p>
       </header>
 
       <nav className="tabs">
-        <button className={tab === 'session' ? 'tab active' : 'tab'} onClick={() => setTab('session')}>
-          ⏱️ セッション
-        </button>
-        <button className={tab === 'schedule' ? 'tab active' : 'tab'} onClick={() => setTab('schedule')}>
-          📅 スケジュール
-        </button>
-        <button className={tab === 'analytics' ? 'tab active' : 'tab'} onClick={() => setTab('analytics')}>
-          📊 レポート
-        </button>
-        <button className={tab === 'settings' ? 'tab active' : 'tab'} onClick={() => setTab('settings')}>
-          ⚙️ 設定
-        </button>
+        <button className={tab === 'session' ? 'tab active' : 'tab'} onClick={() => setTab('session')}>Session</button>
+        <button className={tab === 'schedule' ? 'tab active' : 'tab'} onClick={() => setTab('schedule')}>Schedule</button>
+        <button className={tab === 'report' ? 'tab active' : 'tab'} onClick={() => setTab('report')}>Report</button>
+        <button className={tab === 'settings' ? 'tab active' : 'tab'} onClick={() => setTab('settings')}>Settings</button>
       </nav>
+
+      <div className={`ai-banner ${aiClass}`}>
+        <span>AI 状态：{aiStatus?.message || '读取中...'}</span>
+        {aiStatus?.model && <span className="ai-model">{aiStatus.model}</span>}
+      </div>
 
       {tab === 'session' && (
         <>
           {!isRunning ? (
             <section className="controls">
               <div className="input-group">
-                <label>学習目標</label>
-                <input type="text" value={task} onChange={(e) => setTask(e.target.value)}
-                  placeholder="例：数学を勉強する / 論文を書く / 英語を復習する" />
+                <label>当前任务</label>
+                <input ref={taskRef} type="text" value={task} onChange={(e) => setTask(e.target.value)}
+                  placeholder="例如：开发产品 / 写报告 / 准备面谈" />
               </div>
               <div className="input-row">
                 <div className="input-group">
-                  <label>学習時間（分）</label>
+                  <label>工作时长（分钟）</label>
                   <input type="number" value={duration} onChange={(e) => setDuration(e.target.value)} min="1" step="1" />
                 </div>
                 <div className="input-group">
-                  <label>チェック間隔（秒）</label>
+                  <label>检查间隔（秒）</label>
                   <input type="number" value={interval} onChange={(e) => setInterval_(e.target.value)} min="5" step="1" />
                 </div>
               </div>
-              <button className="btn-start" onClick={handleStart}>▶️ 監督を開始</button>
-              <button className="btn-test" onClick={() => testBlock()}>🧪 テスト（遮蔽画面を表示）</button>
+              {formError && <p className="form-error">{formError}</p>}
+              <button className="btn-start" onClick={handleStart}>开始监督</button>
+              <button className="btn-test" onClick={() => testBlock()}>测试遮挡窗口</button>
             </section>
           ) : (
             <section className="status-panel">
               <div className="status-header">
                 <div className="status-badge">{getStatusLabel()}</div>
-                <button className="btn-stop" onClick={handleStop}>⏹️ 停止</button>
+                <button className="btn-stop" onClick={handleStop}>停止</button>
               </div>
               <div className="status-info">
-                <div className="info-item">
-                  <span className="label">現在のタスク</span>
-                  <span className="value">{status?.task || task}</span>
-                </div>
-                <div className="info-item">
-                  <span className="label">残り時間</span>
-                  <span className="value timer">{formatTime(status?.remaining_seconds)}</span>
-                </div>
-                <div className="info-item">
-                  <span className="label">現在の活動</span>
-                  <span className="value">{status?.latest_judgement?.current_activity || '待機中...'}</span>
-                </div>
-                <div className="info-item">
-                  <span className="label">AI理由</span>
-                  <span className="value">{status?.latest_judgement?.reason || '--'}</span>
-                </div>
-                <div className="info-item">
-                  <span className="label">連続気散り回数</span>
-                  <span className={`value ${status?.off_task_streak >= 2 ? 'danger' : ''}`}>
-                    {status?.off_task_streak ?? 0}
-                  </span>
-                </div>
+                <div className="info-item"><span className="label">任务</span><span className="value">{status?.task || task}</span></div>
+                <div className="info-item"><span className="label">来源</span><span className="value">{status?.source === 'schedule' ? 'Schedule' : '手动'}</span></div>
+                <div className="info-item"><span className="label">剩余时间</span><span className="value timer">{formatTime(status?.remaining_seconds)}</span></div>
+                <div className="info-item"><span className="label">当前活动</span><span className="value">{status?.latest_judgement?.current_activity || '等待检查...'}</span></div>
+                <div className="info-item"><span className="label">AI 理由</span><span className="value">{statusText}</span></div>
+                <div className="info-item"><span className="label">连续分心</span><span className={`value ${status?.off_task_streak >= 2 ? 'danger' : ''}`}>{status?.off_task_streak ?? 0}</span></div>
               </div>
             </section>
           )}
 
           {status?.logs && status.logs.length > 0 && (
             <section className="logs">
-              <h2>📋 セッションログ</h2>
+              <h2>最近检查</h2>
               <div className="log-list">
                 {[...status.logs].reverse().map((log, i) => (
-                  <div key={i} className={`log-item ${log.on_task ? 'on-task' : 'off-task'}`}>
+                  <div key={i} className={`log-item ${log.judgement_status === 'api_error' ? 'api-error' : log.on_task ? 'on-task' : 'off-task'}`}>
                     <div className="log-time">{new Date(log.timestamp).toLocaleTimeString()}</div>
-                    <div className="log-status">{log.on_task ? '✅' : '❌'}</div>
                     <div className="log-details">
                       <span className="log-activity">{log.current_activity}</span>
                       <span className="log-reason">{log.reason}</span>
-                      {log.model && <span className="log-model">{log.model}</span>}
+                      <span className="log-model">{log.judgement_status || 'ok'} · {log.model || '--'}</span>
                     </div>
-                    <div className="log-confidence">{Math.round(log.confidence * 100)}%</div>
+                    <div className="log-confidence">{Math.round((log.confidence || 0) * 100)}%</div>
                   </div>
                 ))}
               </div>
@@ -263,41 +300,41 @@ function App() {
 
       {tab === 'schedule' && (
         <section className="schedule-panel">
-          <h2>📅 学習スケジュール</h2>
+          <h2>自动日程</h2>
           <div className="schedule-form">
             <div className="input-group">
-              <label>タスク</label>
+              <label>任务</label>
               <input type="text" value={schedTask} onChange={(e) => setSchedTask(e.target.value)}
-                placeholder="例：数学を勉強する" />
+                placeholder="例如：产品开发" />
             </div>
             <div className="input-row">
               <div className="input-group">
-                <label>日付</label>
+                <label>日期</label>
                 <input type="date" value={schedDate} onChange={(e) => setSchedDate(e.target.value)} />
               </div>
               <div className="input-group">
-                <label>開始時間</label>
-                <input type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)} />
+                <label>开始</label>
+                <input type="time" value={schedStart} onChange={(e) => setSchedStart(e.target.value)} />
               </div>
               <div className="input-group">
-                <label>時間（分）</label>
-                <input type="number" value={schedDuration} onChange={(e) => setSchedDuration(e.target.value)} min="5" step="1" />
+                <label>结束</label>
+                <input type="time" value={schedEnd} onChange={(e) => setSchedEnd(e.target.value)} />
               </div>
             </div>
-            <button className="btn-start" onClick={handleAddSchedule}>➕ スケジュールに追加</button>
+            {scheduleError && <p className="form-error">{scheduleError}</p>}
+            <button className="btn-start" onClick={handleAddSchedule}>添加日程</button>
           </div>
 
           <div className="schedule-list">
-            {schedules.length === 0 && <p className="empty-msg">まだスケジュールがありません</p>}
+            {schedules.length === 0 && <p className="empty-msg">暂无日程</p>}
             {schedules.map((s) => (
               <div key={s.id} className="schedule-item">
                 <div className="schedule-info">
                   <span className="schedule-task">{s.task}</span>
-                  <span className="schedule-time">{s.date} {s.start_time} ({s.duration_minutes}分)</span>
+                  <span className="schedule-time">{s.date} {s.start_time} - {s.end_time} · {s.status === 'in_progress' ? '进行中' : '未开始'}</span>
                 </div>
                 <div className="schedule-actions">
-                  <button className="btn-small btn-green" onClick={() => handleStartFromSchedule(s)}>▶</button>
-                  <button className="btn-small btn-red" onClick={() => handleDeleteSchedule(s.id)}>✕</button>
+                  <button className="btn-small btn-red" onClick={() => handleDeleteSchedule(s.id)}>×</button>
                 </div>
               </div>
             ))}
@@ -305,106 +342,59 @@ function App() {
         </section>
       )}
 
-      {tab === 'analytics' && (
+      {tab === 'report' && (
         <section className="analytics-panel">
-          <h2>📊 学習レポート</h2>
+          <div className="section-title-row">
+            <h2>每日报告</h2>
+            <input type="date" value={reportDate} onChange={(e) => setReportDate(e.target.value)} />
+          </div>
 
-          {analytics && (
+          {dailyReport ? (
             <>
               <div className="stats-grid">
-                <div className="stat-card">
-                  <div className="stat-value">{analytics.total_checks}</div>
-                  <div className="stat-label">総チェック数</div>
-                </div>
-                <div className="stat-card good">
-                  <div className="stat-value">{analytics.focus_rate}%</div>
-                  <div className="stat-label">集中率</div>
-                </div>
-                <div className="stat-card">
-                  <div className="stat-value">{analytics.focused_checks}</div>
-                  <div className="stat-label">集中</div>
-                </div>
-                <div className="stat-card bad">
-                  <div className="stat-value">{analytics.distracted_checks}</div>
-                  <div className="stat-label">気散り</div>
-                </div>
+                <div className="stat-card"><div className="stat-value">{dailyReport.total_blocks}</div><div className="stat-label">Block</div></div>
+                <div className="stat-card good"><div className="stat-value">{dailyReport.total_focus_minutes}</div><div className="stat-label">专注分钟</div></div>
+                <div className="stat-card"><div className="stat-value">{dailyReport.completed_blocks}</div><div className="stat-label">完成</div></div>
+                <div className="stat-card bad"><div className="stat-value">{dailyReport.blocks?.reduce((sum, b) => sum + (b.distracted_checks || 0), 0) || 0}</div><div className="stat-label">分心次数</div></div>
               </div>
 
-              {analytics.total_checks > 0 && (
-                <div className="focus-bar-container">
-                  <div className="focus-bar">
-                    <div className="focus-bar-fill" style={{ width: `${analytics.focus_rate}%` }}></div>
-                  </div>
-                  <span className="focus-bar-label">集中 {analytics.focus_rate}% / 気散り {(100 - analytics.focus_rate).toFixed(1)}%</span>
-                </div>
-              )}
-
-              {analytics.top_distractions && analytics.top_distractions.length > 0 && (
-                <div className="section-block">
-                  <h3>🚨 気散りランキング</h3>
-                  <div className="distraction-list">
-                    {analytics.top_distractions.map((d, i) => (
-                      <div key={i} className="distraction-item">
-                        <span className="distraction-rank">#{i + 1}</span>
-                        <span className="distraction-name">{d.activity}</span>
-                        <span className="distraction-count">{d.count}回</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {analytics.sessions && analytics.sessions.length > 0 && (
-                <div className="section-block">
-                  <h3>📈 セッション履歴</h3>
-                  <div className="session-history">
-                    {analytics.sessions.slice(-10).reverse().map((s, i) => (
-                      <div key={i} className="history-item">
-                        <div className="history-task">{s.task}</div>
-                        <div className="history-meta">
-                          <span>{new Date(s.start_time).toLocaleString()}</span>
-                          <span>集中: {s.focused_checks}/{s.total_checks}</span>
-                        </div>
-                        <div className="history-bar">
-                          <div className="history-bar-fill"
-                            style={{ width: `${s.total_checks > 0 ? (s.focused_checks / s.total_checks * 100) : 0}%` }}>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          {wrongAnswers.length > 0 && (
-            <div className="section-block">
-              <h3>❌ 間違えた問題</h3>
-              <div className="wrong-list">
-                {wrongAnswers.slice(-10).reverse().map((w, i) => (
-                  <div key={i} className="wrong-item">
-                    <div className="wrong-question">{w.question}</div>
-                    <div className="wrong-meta">
-                      <span className="wrong-your">あなた: {w.user_answer}</span>
-                      <span className="wrong-correct">正解: {w.correct_answer}</span>
+              <div className="session-history">
+                {(dailyReport.blocks || []).length === 0 && <p className="empty-msg">这一天还没有记录</p>}
+                {(dailyReport.blocks || []).map((b) => (
+                  <div key={b.session_id} className="history-item">
+                    <div className="history-task">{b.task}</div>
+                    <div className="history-meta">
+                      <span>{b.source === 'schedule' ? 'Schedule' : '手动'} · {statusName[b.status] || b.status}</span>
+                      <span>{b.focus_minutes} 分钟专注</span>
+                    </div>
+                    <div className="history-meta">
+                      <span>{b.planned_start ? new Date(b.planned_start).toLocaleTimeString() : '--'} - {b.planned_end ? new Date(b.planned_end).toLocaleTimeString() : '--'}</span>
+                      <span>分心 {b.distracted_checks || 0} · AI 错误 {b.api_error_checks || 0}</span>
+                    </div>
+                    <div className="history-bar">
+                      <div className="history-bar-fill" style={{ width: `${b.total_checks > 0 ? (b.focused_checks / b.total_checks * 100) : 0}%` }}></div>
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
+            </>
+          ) : (
+            <p className="empty-msg">报告读取失败</p>
           )}
-
-          {!analytics && <p className="empty-msg">データがまだありません。セッションを開始してください。</p>}
         </section>
       )}
 
       {tab === 'settings' && (
         <section className="settings-panel">
-          <h2>⚙️ 設定</h2>
+          <h2>设置</h2>
+
+          <div className={`ai-banner ${aiClass}`}>
+            <span>{aiStatus?.message || 'AI 状态读取中...'}</span>
+            {aiStatus?.last_error_at && <span className="ai-model">最近错误：{new Date(aiStatus.last_error_at).toLocaleString()}</span>}
+          </div>
 
           <div className="input-group">
-            <label>AIモデル</label>
+            <label>AI 模型</label>
             <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
               {modelOptions.map((model) => (
                 <option key={model.id} value={model.id}>{model.label}</option>
@@ -427,9 +417,9 @@ function App() {
             ))}
           </div>
 
-          <button className="btn-start" onClick={handleSaveSettings}>保存</button>
+          <button className="btn-start" onClick={handleSaveSettings}>保存设置</button>
           {settingsStatus && <p className="settings-status">{settingsStatus}</p>}
-          {settings?.model && <p className="settings-current">現在: {settings.model}</p>}
+          {settings?.model && <p className="settings-current">当前模型：{settings.model}</p>}
         </section>
       )}
     </div>

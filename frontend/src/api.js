@@ -20,7 +20,14 @@ const API_BASE = getApiBase();
 async function api(path, options) {
   const res = await fetch(`${API_BASE}${path}`, options);
   if (!res.ok) {
-    throw new Error(`API request failed: ${res.status} ${res.statusText}`);
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch (e) {
+      // Ignore JSON parse errors for non-JSON backend errors.
+    }
+    throw new Error(detail);
   }
   return res.json();
 }
@@ -51,11 +58,11 @@ export async function getSchedules() {
   return api('/schedule/list');
 }
 
-export async function addSchedule(task, date, startTime, durationMinutes, checkIntervalSeconds) {
+export async function addSchedule(task, date, startTime, endTime, checkIntervalSeconds) {
   return api('/schedule/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task, date, start_time: startTime, duration_minutes: durationMinutes, check_interval_seconds: checkIntervalSeconds }),
+    body: JSON.stringify({ task, date, start_time: startTime, end_time: endTime, check_interval_seconds: checkIntervalSeconds }),
   });
 }
 
@@ -70,6 +77,11 @@ export async function deleteSchedule(scheduleId) {
 // Analytics APIs
 export async function getAnalytics() {
   return api('/analytics/summary');
+}
+
+export async function getDailyReport(date) {
+  const suffix = date ? `?date=${encodeURIComponent(date)}` : '';
+  return api(`/report/daily${suffix}`);
 }
 
 // Quiz APIs
@@ -93,4 +105,8 @@ export async function saveSettings(model) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model }),
   });
+}
+
+export async function getAiStatus() {
+  return api('/ai/status');
 }

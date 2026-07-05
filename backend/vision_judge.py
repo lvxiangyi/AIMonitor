@@ -5,6 +5,12 @@ import random
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from ai_status_manager import (
+    has_api_key,
+    is_mock_enabled,
+    record_ai_error,
+    record_ai_success,
+)
 from settings_manager import get_selected_model
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -102,6 +108,20 @@ def _mock_judge(task: str) -> dict:
         "confidence": round(random.uniform(0.6, 0.95), 2),
         "current_activity": activity,
         "reason": reason,
+        "judgement_status": "mock",
+        "model": "mock",
+    }
+
+
+def _api_error_result(task: str, error: str, model: str = "") -> dict:
+    return {
+        "on_task": True,
+        "confidence": 0,
+        "current_activity": "AI 判定不可用",
+        "reason": f"AI 连接失败，本次检查已暂停判定：{error}",
+        "judgement_status": "api_error",
+        "error": error,
+        "model": model or "api-error",
     }
 
 
@@ -115,17 +135,22 @@ def _get_client():
 
 def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> dict:
     """Judge whether the user is on task based on a screenshot."""
-    if not OPENROUTER_API_KEY or OPENROUTER_API_KEY == "your_api_key_here":
-        print("[vision_judge] No valid API key found, using mock mode.")
-        result = _mock_judge(task)
-        result["model"] = "mock"
-        return result
+    model = get_selected_model()
+
+    if is_mock_enabled():
+        print("[vision_judge] AIMONITOR_ENABLE_MOCK_AI is enabled, using mock mode.")
+        return _mock_judge(task)
+
+    if not has_api_key():
+        error = "No valid OpenRouter API key configured."
+        print(f"[vision_judge] {error}")
+        record_ai_error(error, model=model)
+        return _api_error_result(task, error, model=model)
 
     memory_context = _format_memory_context(memory or [])
 
     try:
         client = _get_client()
-        model = get_selected_model()
         print(f"[vision_judge] Using model: {model}")
 
         with open(screenshot_path, "rb") as f:
@@ -161,19 +186,26 @@ def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> di
 
         result = json.loads(content)
         result["model"] = model
+        result["judgement_status"] = "ok"
+        record_ai_success(model)
         return result
 
     except Exception as e:
-        print(f"[vision_judge] Error calling OpenRouter API: {e}")
-        print("[vision_judge] Falling back to mock mode.")
-        return _mock_judge(task)
+        error = str(e)
+        print(f"[vision_judge] Error calling OpenRouter API: {error}")
+        print("[vision_judge] Pausing this judgement instead of using random mock mode.")
+        record_ai_error(error, model=model)
+        return _api_error_result(task, error, model=model)
 
 
 def evaluate_dispute(task: str, activity: str, original_reason: str, user_reason: str, memory: list = None) -> dict:
     """Evaluate a user's dispute against an AI judgement."""
-    if not OPENROUTER_API_KEY or OPENROUTER_API_KEY == "your_api_key_here":
+    if is_mock_enabled():
         print("[vision_judge] No valid API key, auto-accepting dispute in mock mode.")
         return {"accepted": True, "ai_reason": "Mock mode: dispute auto-accepted."}
+
+    if not has_api_key():
+        return {"accepted": True, "ai_reason": "AI 未连接，默认接受本次异议。"}
 
     memory_context = _format_memory_context(memory or [])
 
