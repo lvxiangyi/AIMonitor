@@ -11,6 +11,7 @@ from screenshot import take_screenshot
 
 ALLOWED_LABELS = {"on_task", "off_task", "ambiguous", "unlabeled"}
 PROMPT_VERSION = "v1"
+DEFAULT_TAGS = ["guardian mode"]
 
 
 def _now() -> str:
@@ -38,6 +39,7 @@ def _init_db(conn):
             activity TEXT,
             distraction_label TEXT NOT NULL DEFAULT 'unlabeled',
             label_notes TEXT,
+            tags TEXT NOT NULL DEFAULT '["guardian mode"]',
 
             source TEXT NOT NULL DEFAULT 'hotkey',
             reviewed INTEGER NOT NULL DEFAULT 0,
@@ -54,6 +56,9 @@ def _init_db(conn):
         )
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(samples)").fetchall()}
+    if "tags" not in columns:
+        conn.execute("""ALTER TABLE samples ADD COLUMN tags TEXT NOT NULL DEFAULT '["guardian mode"]'""")
     conn.commit()
 
 
@@ -64,8 +69,41 @@ def _row_to_dict(row) -> Optional[dict]:
     data["reviewed"] = bool(data.get("reviewed"))
     if data.get("ai_on_task") is not None:
         data["ai_on_task"] = bool(data["ai_on_task"])
+    data["tags"] = _normalize_tags(data.get("tags"), default_to_guardian=data.get("tags") in (None, ""))
     data["screenshot_url"] = f"/dataset/samples/{data['id']}/image"
     return data
+
+
+def _normalize_tags(value, default_to_guardian: bool = False) -> list:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                raw_items = parsed
+            else:
+                raw_items = value.replace("，", "\n").replace(",", "\n").splitlines()
+        except Exception:
+            raw_items = value.replace("，", "\n").replace(",", "\n").splitlines()
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+
+    normalized = []
+    seen = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+
+    if not normalized and default_to_guardian:
+        return DEFAULT_TAGS.copy()
+    return normalized
 
 
 def _validate_label(label: str) -> str:
@@ -90,6 +128,7 @@ def create_sample(
     session_id: Optional[str] = None,
     activity: Optional[str] = None,
     label_notes: Optional[str] = None,
+    tags: Optional[list] = None,
     source: str = "hotkey",
     ai_prediction: Optional[dict] = None,
 ) -> dict:
@@ -110,10 +149,10 @@ def create_sample(
             """
             INSERT INTO samples (
                 id, screenshot_path, captured_at, session_id, task,
-                activity, distraction_label, label_notes, source, reviewed,
+                activity, distraction_label, label_notes, tags, source, reviewed,
                 ai_on_task, ai_confidence, ai_activity, ai_reason, ai_model, prompt_version,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 sample_id,
@@ -124,6 +163,7 @@ def create_sample(
                 activity,
                 _validate_label(label),
                 label_notes,
+                json.dumps(_normalize_tags(DEFAULT_TAGS if tags is None else tags, default_to_guardian=True), ensure_ascii=False),
                 source or "hotkey",
                 0,
                 None if ai_prediction.get("on_task") is None else int(bool(ai_prediction.get("on_task"))),
@@ -171,6 +211,7 @@ def update_sample(sample_id: str, **updates) -> Optional[dict]:
         "activity",
         "distraction_label",
         "label_notes",
+        "tags",
         "reviewed",
         "ai_on_task",
         "ai_confidence",
@@ -186,6 +227,8 @@ def update_sample(sample_id: str, **updates) -> Optional[dict]:
             continue
         if key == "distraction_label":
             value = _validate_label(value)
+        if key == "tags":
+            value = json.dumps(_normalize_tags(value), ensure_ascii=False)
         if key in {"reviewed", "ai_on_task"}:
             value = int(bool(value))
         fields.append(f"{key} = ?")
@@ -234,6 +277,7 @@ def export_jsonl(output_path: Optional[str] = None) -> dict:
                 "image_path": sample["screenshot_path"],
                 "captured_at": sample["captured_at"],
                 "task": sample["task"],
+                "tags": sample.get("tags") or DEFAULT_TAGS,
                 "activity": sample.get("activity") or "",
                 "ground_truth": sample["distraction_label"],
                 "notes": sample.get("label_notes") or "",

@@ -14,6 +14,7 @@ from ctypes import wintypes
 
 BACKEND_URL = "http://127.0.0.1:" + os.environ.get("FOCUSGUARD_PORT", "8899")
 UI_SCALE = 2.0
+TRANSLATION_REQUIRED_COUNT = 3
 
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
@@ -226,6 +227,8 @@ class BlockerWindow:
         strict_mode: bool = False,
         nudge_message: str = "",
         recovery: bool = True,
+        recovery_mode: str = "session",
+        translation_count: int = 1,
     ):
         """Show the blocker window with a quiz."""
         if self._is_showing:
@@ -233,7 +236,18 @@ class BlockerWindow:
         self._is_showing = True
         self._task = task
         # Queue the show command to run on tkinter thread
-        self._command_queue.put(lambda: self._do_show(task, activity, reason, strict_mode, nudge_message, recovery))
+        self._command_queue.put(
+            lambda: self._do_show(
+                task,
+                activity,
+                reason,
+                strict_mode,
+                nudge_message,
+                recovery,
+                recovery_mode,
+                translation_count,
+            )
+        )
 
     def show_message(self, title: str, message: str):
         """Show a dismissible desktop message."""
@@ -276,7 +290,17 @@ class BlockerWindow:
     def is_showing(self):
         return self._is_showing
 
-    def _do_show(self, task, activity, reason, strict_mode=False, nudge_message="", recovery=True):
+    def _do_show(
+        self,
+        task,
+        activity,
+        reason,
+        strict_mode=False,
+        nudge_message="",
+        recovery=True,
+        recovery_mode="session",
+        translation_count=1,
+    ):
         """Show window and load quiz (runs on tk thread)."""
         # Force fullscreen size again in case resolution changed.
         rect = _virtual_screen_rect()
@@ -293,7 +317,15 @@ class BlockerWindow:
         self._root.focus_force()
         self._grab_modal(global_grab=not strict_mode)
         if strict_mode:
-            self._load_translation_unlock(task, activity, reason, nudge_message=nudge_message, recovery=recovery)
+            self._load_translation_unlock(
+                task,
+                activity,
+                reason,
+                nudge_message=nudge_message,
+                recovery=recovery,
+                recovery_mode=recovery_mode,
+                challenge_total=translation_count,
+            )
         else:
             self._load_quiz(task, activity, reason)
 
@@ -607,7 +639,8 @@ class BlockerWindow:
             payload.get("activity", "休息结束"),
             "休息时间已结束，请完成翻译题后回到学习。",
             nudge_message=payload.get("minimum_next_step", ""),
-            resume_payload=payload,
+            resume_payload=None if payload.get("guardian_mode") else payload,
+            challenge_total=int(payload.get("translation_count") or 1),
         )
 
     def _parse_tags(self, tags_entry):
@@ -778,24 +811,46 @@ class BlockerWindow:
                 "explanation": "\u30dd\u30e2\u30c9\u30fc\u30ed\u30fb\u30c6\u30af\u30cb\u30c3\u30af\u306f\u79d1\u5b66\u7684\u306b\u52b9\u679c\u304c\u5b9f\u8a3c\u3055\u308c\u3066\u3044\u307e\u3059\u3002"
             }
 
-    def _load_translation_unlock(self, task, activity, reason, nudge_message="", recovery=False, resume_payload=None):
+    def _load_translation_unlock(
+        self,
+        task,
+        activity,
+        reason,
+        nudge_message="",
+        recovery=False,
+        resume_payload=None,
+        recovery_mode="session",
+        challenge_total=1,
+        challenge_index=1,
+    ):
         """Show loading state then fetch a strict-mode translation challenge."""
         self._clear_content()
         frame = self._content_frame
         tk.Label(
             frame,
-            text="厳格モード：翻訳問題を読み込み中...",
-            font=("Segoe UI", 18),
+            text=f"厳格モード：翻訳問題を読み込み中... ({challenge_index}/{max(1, challenge_total)})",
+            font=("Segoe UI", _s(18)),
             fg="#f1c40f",
             bg="#0f0f23",
         ).pack(pady=50)
         threading.Thread(
             target=self._fetch_and_render_translation,
-            args=(task, activity, reason, nudge_message, recovery, resume_payload),
+            args=(task, activity, reason, nudge_message, recovery, resume_payload, recovery_mode, challenge_total, challenge_index),
             daemon=True,
         ).start()
 
-    def _fetch_and_render_translation(self, task, activity, reason, nudge_message="", recovery=False, resume_payload=None):
+    def _fetch_and_render_translation(
+        self,
+        task,
+        activity,
+        reason,
+        nudge_message="",
+        recovery=False,
+        resume_payload=None,
+        recovery_mode="session",
+        challenge_total=1,
+        challenge_index=1,
+    ):
         try:
             res = requests.get(f"{BACKEND_URL}/strict/translation", timeout=10)
             challenge = res.json()
@@ -815,6 +870,9 @@ class BlockerWindow:
                 nudge_message=nudge_message,
                 recovery=recovery,
                 resume_payload=resume_payload,
+                recovery_mode=recovery_mode,
+                challenge_total=challenge_total,
+                challenge_index=challenge_index,
             )
         )
 
@@ -827,67 +885,81 @@ class BlockerWindow:
         nudge_message="",
         recovery=False,
         resume_payload=None,
+        recovery_mode="session",
+        challenge_total=1,
+        challenge_index=1,
     ):
         """Render strict-mode English-to-Japanese unlock task."""
         self._clear_content()
         frame = self._content_frame
+        monitor_rect = _cursor_monitor_rect()
+        _, _, monitor_width, monitor_height = monitor_rect
+        content_width = min(max(int(monitor_width * 0.72), 1100), int(monitor_width * 0.9))
+        title_font = min(max(int(monitor_height * 0.022), 34), 52)
+        body_font = min(max(int(monitor_height * 0.012), 18), 26)
+        source_font = min(max(int(monitor_height * 0.017), 26), 40)
+        input_font = min(max(int(monitor_height * 0.014), 22), 32)
+        answer_width = max(72, min(110, int(content_width / max(10, input_font * 0.58))))
+        final_challenge = int(challenge_index) >= max(1, int(challenge_total or 1))
+
+        tk.Frame(frame, bg="#0f0f23", width=content_width, height=1).pack()
 
         tk.Label(
             frame,
-            text="厳格モード：分心を検出しました",
-            font=("Segoe UI", 24, "bold"),
+            text=f"厳格モード：分心を検出しました ({challenge_index}/{max(1, challenge_total)})",
+            font=("Segoe UI", title_font, "bold"),
             fg="#f1c40f",
             bg="#0f0f23",
-        ).pack(pady=(0, 8))
+        ).pack(pady=(0, 12))
         info = f"タスク：{task}"
         if activity:
             info += f"  |  検出：{activity}"
-        tk.Label(frame, text=info, font=("Segoe UI", 11), fg="#888", bg="#0f0f23").pack(pady=(0, 16))
+        tk.Label(frame, text=info, font=("Segoe UI", body_font), fg="#888", bg="#0f0f23").pack(pady=(0, 18))
         tk.Label(
             frame,
             text="Translate the English sentence into Japanese. Romaji is accepted if IME is unavailable.",
-            font=("Segoe UI", 12),
+            font=("Segoe UI", body_font),
             fg="#cbd5e1",
             bg="#0f0f23",
-            wraplength=760,
+            wraplength=content_width,
             justify="center",
-        ).pack(pady=(0, 14))
+        ).pack(pady=(0, 16))
         if nudge_message:
             tk.Label(
                 frame,
                 text=nudge_message,
-                font=("Segoe UI", 12),
+                font=("Segoe UI", body_font),
                 fg="#f8fafc",
                 bg="#15172a",
-                wraplength=760,
+                wraplength=content_width,
                 justify="center",
-                padx=14,
-                pady=10,
-            ).pack(fill="x", pady=(0, 14))
+                padx=22,
+                pady=16,
+            ).pack(fill="x", pady=(0, 16))
         language_label = tk.Label(
             frame,
             text=_keyboard_layout_label(),
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", max(12, body_font - 1), "bold"),
             fg="#f1c40f",
             bg="#0f0f23",
         )
-        language_label.pack(pady=(0, 12))
+        language_label.pack(pady=(0, 14))
         self._refresh_language_label(language_label)
         tk.Label(
             frame,
             text=challenge.get("source_text", ""),
-            font=("Segoe UI", 18, "bold"),
+            font=("Segoe UI", source_font, "bold"),
             fg="#ffffff",
             bg="#0f0f23",
-            wraplength=760,
+            wraplength=content_width,
             justify="center",
-        ).pack(pady=(0, 16))
+        ).pack(pady=(0, 20))
 
         answer = tk.Text(
             frame,
-            font=("Segoe UI", 15),
-            width=54,
-            height=3,
+            font=("Segoe UI", input_font),
+            width=answer_width,
+            height=4,
             wrap="word",
             bg="#1a1a2e",
             fg="#ffffff",
@@ -896,11 +968,11 @@ class BlockerWindow:
             highlightthickness=1,
             highlightcolor="#f1c40f",
         )
-        answer.pack(pady=(0, 12))
+        answer.pack(pady=(0, 16), ipadx=8, ipady=8)
         answer.focus_set()
 
-        result_lbl = tk.Label(frame, text="", font=("Segoe UI", 12), fg="#cbd5e1", bg="#0f0f23", wraplength=700)
-        result_lbl.pack(pady=(0, 12))
+        result_lbl = tk.Label(frame, text="", font=("Segoe UI", body_font), fg="#cbd5e1", bg="#0f0f23", wraplength=content_width)
+        result_lbl.pack(pady=(0, 14))
 
         button_row = tk.Frame(frame, bg="#0f0f23")
         button_row.pack()
@@ -910,45 +982,62 @@ class BlockerWindow:
         tk.Button(
             button_row,
             text="Submit",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", body_font, "bold"),
             fg="#0f0f23",
             bg="#f1c40f",
             activebackground="#d4ac0d",
             activeforeground="#0f0f23",
             relief="flat",
-            padx=24,
-            pady=8,
+            padx=34,
+            pady=12,
             cursor="hand2",
-            command=lambda: self._submit_translation_unlock(challenge, answer, result_lbl, unlock_widgets),
+            command=lambda: self._submit_translation_unlock(
+                challenge,
+                answer,
+                result_lbl,
+                unlock_widgets,
+                task,
+                activity,
+                reason,
+                nudge_message,
+                recovery,
+                resume_payload,
+                recovery_mode,
+                challenge_total,
+                challenge_index,
+            ),
         ).pack(side="left", padx=(0, 10))
 
         tk.Button(
             button_row,
             text="[TEST] Exit",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", max(12, body_font - 2), "bold"),
             fg="#cbd5e1",
             bg="#2a2a4a",
             activebackground="#3a3a5a",
             activeforeground="#ffffff",
             relief="flat",
-            padx=16,
-            pady=8,
+            padx=22,
+            pady=12,
             cursor="hand2",
             command=self._correct_dismiss,
         ).pack(side="left")
+
+        if not final_challenge:
+            return
 
         if resume_payload:
             resume_button = tk.Button(
                 frame,
                 text="翻訳後、次のタスク入力へ",
-                font=("Segoe UI", 11, "bold"),
+                font=("Segoe UI", body_font, "bold"),
                 fg="#0f0f23",
                 bg="#2ecc71",
                 activebackground="#27ae60",
                 activeforeground="#0f0f23",
                 relief="flat",
-                padx=20,
-                pady=8,
+                padx=26,
+                pady=12,
                 cursor="hand2",
                 state="disabled",
                 command=lambda: self._do_show_resume_prompt(resume_payload),
@@ -956,19 +1045,19 @@ class BlockerWindow:
             resume_button.pack(pady=(14, 0))
             unlock_widgets.append(resume_button)
         elif recovery:
-            self._render_recovery_choices(frame, task, unlock_widgets)
+            self._render_recovery_choices(frame, task, unlock_widgets, recovery_mode=recovery_mode)
         else:
             close_button = tk.Button(
                 frame,
-                text="Close",
-                font=("Segoe UI", 10, "bold"),
+                text="回到工作",
+                font=("Segoe UI", body_font, "bold"),
                 fg="#0f0f23",
                 bg="#2ecc71",
                 activebackground="#27ae60",
                 activeforeground="#0f0f23",
                 relief="flat",
-                padx=18,
-                pady=8,
+                padx=28,
+                pady=12,
                 cursor="hand2",
                 state="disabled",
                 command=self._correct_dismiss,
@@ -976,12 +1065,13 @@ class BlockerWindow:
             close_button.pack(pady=(14, 0))
             unlock_widgets.append(close_button)
 
-    def _render_recovery_choices(self, frame, task, unlock_widgets):
+    def _render_recovery_choices(self, frame, task, unlock_widgets, recovery_mode="session"):
+        is_guardian = recovery_mode == "guardian"
         choice_box = tk.Frame(frame, bg="#15172a", padx=14, pady=12)
         choice_box.pack(fill="x", pady=(14, 0))
         tk.Label(
             choice_box,
-            text="翻訳が通ったら、次の一手を選んでください。",
+            text="三题都通过后，选择下一步。",
             font=("Segoe UI", 11, "bold"),
             fg="#ffffff",
             bg="#15172a",
@@ -995,7 +1085,7 @@ class BlockerWindow:
             insertbackground="#ffffff",
             relief="flat",
         )
-        step_entry.insert(0, f"{task} の最小の次の一歩")
+        step_entry.insert(0, "回到工作后的最小下一步" if is_guardian else f"{task} の最小の次の一歩")
         step_entry.pack(fill="x", pady=(0, 8))
 
         row = tk.Frame(choice_box, bg="#15172a")
@@ -1029,7 +1119,7 @@ class BlockerWindow:
             pady=7,
             cursor="hand2",
             state="disabled",
-            command=lambda: self._submit_recovery_work(step_entry, error_label),
+            command=lambda: self._submit_recovery_work(step_entry, error_label, recovery_mode),
         )
         work_button.pack(side="left", padx=(0, 10))
         break_button = tk.Button(
@@ -1043,7 +1133,7 @@ class BlockerWindow:
             pady=7,
             cursor="hand2",
             state="disabled",
-            command=lambda: self._submit_recovery_break(break_minutes, step_entry, error_label),
+            command=lambda: self._submit_recovery_break(break_minutes, step_entry, error_label, recovery_mode),
         )
         break_button.pack(side="left")
         unlock_widgets.extend([work_button, break_button])
@@ -1057,7 +1147,22 @@ class BlockerWindow:
         except Exception:
             pass
 
-    def _submit_translation_unlock(self, challenge, answer_entry, result_lbl, unlock_widgets):
+    def _submit_translation_unlock(
+        self,
+        challenge,
+        answer_entry,
+        result_lbl,
+        unlock_widgets,
+        task,
+        activity,
+        reason,
+        nudge_message,
+        recovery,
+        resume_payload,
+        recovery_mode,
+        challenge_total,
+        challenge_index,
+    ):
         if isinstance(answer_entry, tk.Text):
             answer = answer_entry.get("1.0", "end").strip()
         else:
@@ -1067,11 +1172,40 @@ class BlockerWindow:
             return
         result_lbl.config(text="AI判定中...", fg="#4a9eff")
         threading.Thread(
-            target=lambda: self._do_translation_grade(challenge, answer, result_lbl, unlock_widgets),
+            target=lambda: self._do_translation_grade(
+                challenge,
+                answer,
+                result_lbl,
+                unlock_widgets,
+                task,
+                activity,
+                reason,
+                nudge_message,
+                recovery,
+                resume_payload,
+                recovery_mode,
+                challenge_total,
+                challenge_index,
+            ),
             daemon=True,
         ).start()
 
-    def _do_translation_grade(self, challenge, answer, result_lbl, unlock_widgets):
+    def _do_translation_grade(
+        self,
+        challenge,
+        answer,
+        result_lbl,
+        unlock_widgets,
+        task,
+        activity,
+        reason,
+        nudge_message,
+        recovery,
+        resume_payload,
+        recovery_mode,
+        challenge_total,
+        challenge_index,
+    ):
         try:
             res = requests.post(
                 f"{BACKEND_URL}/strict/translation/grade",
@@ -1085,23 +1219,43 @@ class BlockerWindow:
             result = res.json()
             if result.get("accepted"):
                 feedback = result.get("feedback", "OK")
-                self._command_queue.put(lambda: result_lbl.config(text=f"PASS: {feedback}", fg="#2ecc71"))
-                for widget in unlock_widgets:
-                    self._command_queue.put(lambda w=widget: w.config(state="normal"))
+                if int(challenge_index) < max(1, int(challenge_total or 1)):
+                    self._command_queue.put(lambda: result_lbl.config(text=f"PASS: {feedback}\n下一题加载中...", fg="#2ecc71"))
+                    self._command_queue.put(
+                        lambda: self._root.after(
+                            700,
+                            lambda: self._load_translation_unlock(
+                                task,
+                                activity,
+                                reason,
+                                nudge_message=nudge_message,
+                                recovery=recovery,
+                                resume_payload=resume_payload,
+                                recovery_mode=recovery_mode,
+                                challenge_total=challenge_total,
+                                challenge_index=int(challenge_index) + 1,
+                            ),
+                        )
+                    )
+                else:
+                    self._command_queue.put(lambda: result_lbl.config(text=f"PASS: {feedback}", fg="#2ecc71"))
+                    for widget in unlock_widgets:
+                        self._command_queue.put(lambda w=widget: w.config(state="normal"))
             else:
                 feedback = result.get("feedback", "もう一度翻訳してください。")
                 self._command_queue.put(lambda: result_lbl.config(text=f"RETRY: {feedback}", fg="#e74c3c"))
         except Exception as e:
             self._command_queue.put(lambda: result_lbl.config(text=f"Grade failed: {e}", fg="#e74c3c"))
 
-    def _submit_recovery_work(self, step_entry, error_label):
+    def _submit_recovery_work(self, step_entry, error_label, recovery_mode="session"):
         step = step_entry.get().strip()
         if not step:
             error_label.config(text="请输入一个最小下一步。")
             return
-        self._post_recovery("/session/recovery/work", {"minimum_next_step": step}, error_label)
+        path = "/guardian/recovery/work" if recovery_mode == "guardian" else "/session/recovery/work"
+        self._post_recovery(path, {"minimum_next_step": step}, error_label)
 
-    def _submit_recovery_break(self, minutes_entry, step_entry, error_label):
+    def _submit_recovery_break(self, minutes_entry, step_entry, error_label, recovery_mode="session"):
         try:
             minutes = int(minutes_entry.get().strip())
             if minutes <= 0:
@@ -1113,11 +1267,8 @@ class BlockerWindow:
         if not step:
             error_label.config(text="请输入休息后要做的最小下一步。")
             return
-        self._post_recovery(
-            "/session/recovery/break",
-            {"break_minutes": minutes, "minimum_next_step": step},
-            error_label,
-        )
+        path = "/guardian/recovery/break" if recovery_mode == "guardian" else "/session/recovery/break"
+        self._post_recovery(path, {"break_minutes": minutes, "minimum_next_step": step}, error_label)
 
     def _post_recovery(self, path, payload, error_label):
         error_label.config(text="")

@@ -29,8 +29,12 @@ DATASET_DIR = DATA_DIR / "dataset"
 DATASET_SCREENSHOT_DIR = DATASET_DIR / "screenshots"
 DATASET_EXPORT_DIR = DATASET_DIR / "exports"
 DATASET_DB = DATASET_DIR / "dataset.db"
+GUARDIAN_DIR = DATA_DIR / "guardian"
+GUARDIAN_SCREENSHOT_DIR = GUARDIAN_DIR / "screenshots"
+GUARDIAN_LOG_FILE = GUARDIAN_DIR / "guardian_logs.jsonl"
 
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 DATASET_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 DATASET_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+GUARDIAN_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)

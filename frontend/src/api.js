@@ -136,11 +136,11 @@ export async function getAiStatus() {
 }
 
 // Dataset APIs
-export async function captureDatasetSample(label = 'unlabeled') {
+export async function captureDatasetSample(label = 'unlabeled', tags = undefined) {
   return api('/dataset/capture', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ label }),
+    body: JSON.stringify({ label, ...(tags ? { tags } : {}) }),
   });
 }
 
@@ -176,4 +176,9 @@ export async function openDatasetFolder(sampleId) {
 
 export function getDatasetImageUrl(sample) {
   return `${API_BASE}${sample.screenshot_url}`;
+}
+
+export function getGuardianImageUrl(status) {
+  if (!status?.latest_screenshot_url) return '';
+  return `${API_BASE}${status.latest_screenshot_url}?t=${encodeURIComponent(status.last_checked_at || '')}`;
 }

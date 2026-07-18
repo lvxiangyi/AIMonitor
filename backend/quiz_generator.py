@@ -8,9 +8,10 @@ import os
 import json
 import random
 import uuid
+import re
 from openai import OpenAI
 from dotenv import load_dotenv
-from data_paths import ENV_FILE, LOGS_DIR
+from data_paths import ENV_FILE, LOGS_DIR, PROJECT_ROOT
 from settings_manager import get_selected_model
 
 load_dotenv(dotenv_path=ENV_FILE)
@@ -72,6 +73,8 @@ TRANSLATION_CHALLENGES = [
     "A clear plan makes deep work easier.",
     "I can take a break after finishing this session.",
 ]
+
+PRACTICE_FILE = PROJECT_ROOT.parent / "document" / "0718_Practice.md"
 
 # Fallback quiz bank for common topics
 FALLBACK_QUIZZES = {
@@ -198,12 +201,51 @@ def _fallback_quiz(task: str) -> dict:
     return random.choice(quizzes)
 
 
+def _load_practice_challenges() -> list:
+    if not PRACTICE_FILE.exists():
+        return []
+    try:
+        lines = PRACTICE_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        print(f"[quiz_generator] Could not read practice file: {e}")
+        return []
+
+    challenges = []
+    in_details = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.lower().startswith("<details"):
+            in_details = True
+            continue
+        if stripped.lower().startswith("</details"):
+            in_details = False
+            continue
+        if in_details:
+            continue
+        match = re.match(r"^\d+\.\s+(.+?)\s*$", stripped)
+        if not match:
+            continue
+        sentence = match.group(1).strip().rstrip()
+        sentence = re.sub(r"\s{2,}$", "", sentence).strip()
+        if len(sentence) < 8 or not re.search(r"[A-Za-z]", sentence):
+            continue
+        challenges.append(sentence)
+    return challenges
+
+
+def _translation_challenge_bank() -> list:
+    practice = _load_practice_challenges()
+    return practice or TRANSLATION_CHALLENGES
+
+
 def generate_translation_challenge() -> dict:
     """Generate a simple English-to-Japanese strict-mode unlock challenge."""
+    bank = _translation_challenge_bank()
     return {
         "challenge_id": str(uuid.uuid4())[:8],
-        "source_text": random.choice(TRANSLATION_CHALLENGES),
+        "source_text": random.choice(bank),
         "instruction": "Translate this English sentence into Japanese. Romaji is accepted if IME is unavailable.",
+        "source": "0718_Practice.md" if bank != TRANSLATION_CHALLENGES else "built-in",
     }
 
 

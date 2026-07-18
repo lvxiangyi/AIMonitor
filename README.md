@@ -1,133 +1,78 @@
-# 🛡️ FocusGuard Agent
+# FocusGuard Agent
 
-AI 学习监督助手 — 通过屏幕理解用户行为，在分心时主动干预。
+AI-assisted focus monitor for Windows. It watches the current screen, detects distraction, and uses short English-to-Japanese translation challenges to help the user return to work.
 
-## Run as a Windows desktop app
+## Quick Start
 
-This is the recommended workflow for daily personal use on Windows.
-
-### First-time setup
-
-Double-click:
+First-time setup:
 
 ```bat
 setup_windows.bat
 ```
 
-This creates `backend/.venv`, installs backend dependencies, installs frontend dependencies, builds `frontend/dist`, and installs Electron dependencies.
-
-### Daily stable use
-
-Double-click:
+Daily stable use:
 
 ```bat
 start_stable.bat
 ```
 
-Stable mode opens the Electron desktop window, starts the FastAPI backend automatically with `backend/.venv/Scripts/python.exe`, and loads the already-built `frontend/dist/index.html`. It does not require or start the Vite frontend dev server.
-
-### Rebuild frontend after frontend changes
-
-Only when you change frontend code, run:
-
-```bat
-build_frontend.bat
-```
-
-Then use `start_stable.bat` again.
-
-### Development mode
-
-For active development, run:
+Development mode:
 
 ```bat
 start_dev.bat
 ```
 
-This opens the reload backend on `127.0.0.1:8000` and the Vite frontend dev server on `127.0.0.1:3000` in separate terminals.
-
-To also open Electron against those dev servers:
+Open Electron against the dev servers:
 
 ```bat
 start_dev.bat electron
 ```
 
-Use `start_stable.bat` for daily planning/focus monitoring. Use `start_dev.bat` only when developing.
+## Configuration
 
-### Windows auto-start
+Create or edit `.env` in the project root:
 
-1. Press Win + R
-2. Type `shell:startup`
-3. Create a shortcut to `start_stable.bat`
-4. Move the shortcut into that folder
-
-### Data safety
-
-Stable mode uses `data/prod/` for logs, schedules, quiz history, and screenshots. Dev mode uses `data/dev/`. Avoid directly modifying stable user data during risky development, and back up local data before database schema or data format changes.
-
-### Multi-monitor screenshots
-
-By default, FocusGuard captures only the display that currently contains the mouse cursor. This avoids sending both monitors to the vision model when a second screen has unrelated content.
-
-To temporarily return to full virtual-screen capture, start the backend/Electron with:
-
-```bat
-set AIMONITOR_SCREENSHOT_MODE=full
+```env
+OPENROUTER_API_KEY=sk-or-your-real-key
 ```
 
-### AI model settings
-
-The default model is `google/gemini-2.5-flash-lite`. You can change the model from the Settings tab in the desktop app. The selected model is saved in:
+User settings are stored locally in:
 
 ```text
 data/prod/settings.json
 ```
 
-Current built-in options:
+Dev mode uses `data/dev/`; stable packaged mode uses `data/prod/`.
 
-- `google/gemini-2.5-flash-lite`
-- `openai/gpt-4o`
-- `openai/gpt-4o-mini`
+## Build Release
 
-## 快速启动（开发）
+Run:
 
-### 1. 后端
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+```powershell
+powershell -ExecutionPolicy Bypass -File package_release.ps1
 ```
 
-### 2. 前端
+Release artifacts are written to:
 
-```bash
-cd frontend
-npm install
-npm run dev
+```text
+electron/release/
 ```
 
-打开 http://localhost:3000
+The dated release names use this format:
 
-### 3. 配置 API Key（可选）
-
-编辑根目录 `.env` 文件：
-
-```env
-OPENROUTER_API_KEY=sk-or-your-real-key-here
+```text
+FocusGuard-Agent-<version>-<YYYY-MM-DD>-win-unpacked/
+FocusGuard-Agent-<version>-<YYYY-MM-DD>-win-unpacked.zip
 ```
 
-如果不配置，系统自动使用 mock 模式（随机返回专注/分心结果，方便调试）。
+Example:
 
-## 使用方式
+```text
+FocusGuard-Agent-1.0.1-2026-07-18-win-unpacked.zip
+```
 
-1. 输入学习目标（例如：学习数学）
-2. 设置时长和检查间隔
-3. 点击"开始监督"
-4. Agent 会定期截图并判断你是否在执行任务
-5. 连续 2 次分心会弹出全屏提醒
+## Notes
 
-## 技术栈
-
-- **后端**: Python FastAPI + mss(截图) + OpenAI GPT-4o Vision
-- **前端**: React + Vite
+- The app captures the display containing the mouse cursor by default.
+- Set `AIMONITOR_SCREENSHOT_MODE=full` to capture the full virtual screen.
+- The packaged Windows app is distributed as `win-unpacked` because the single-file portable build requires NSIS downloads during packaging.

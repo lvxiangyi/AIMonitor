@@ -86,13 +86,17 @@ Interrupt only for clearly visible:
 - reading manga or comics for entertainment
 - playing or watching games as entertainment
 
+These are OR conditions. If any one category is clearly visible, set should_interrupt=true.
+Adult/sexual content is only one category; novels, web novels, manga, comics, and games do not need to be adult/sexual to trigger.
+
 Do not interrupt for normal work, study, coding, writing, documentation, chat about work, music players, timers, utilities, or ambiguous screens.
-If a visible activity clearly matches the user-defined whitelist, do not interrupt unless it is porn/adult sexual content.
+If a visible activity clearly matches the user-defined whitelist, do not interrupt unless it also clearly falls into one of the four interrupt categories above.
 If unsure, do not interrupt.
 
 Return JSON only:
 {{
   "should_interrupt": true or false,
+  "trigger_category": "adult" or "novel" or "manga" or "game" or "none",
   "confidence": number between 0 and 1,
   "current_activity": "short description of what the user is doing",
   "reason": "short explanation"
@@ -100,6 +104,7 @@ Return JSON only:
 
 Meaning:
 - should_interrupt=true only for the explicit Guardian categories above.
+- should_interrupt=true when trigger_category is adult, novel, manga, or game.
 - should_interrupt=false for papers, articles, search pages, normal work/study, ambiguous reading, or anything that is not clearly entertainment/adult content.
 """
 
@@ -305,6 +310,12 @@ def judge_guardian_screenshot(screenshot_path: str) -> dict:
         result = json.loads(content)
         if "should_interrupt" in result:
             result["on_task"] = not bool(result["should_interrupt"])
+        category = str(result.get("trigger_category", "none")).strip().lower()
+        if category in {"adult", "novel", "manga", "game"}:
+            result["should_interrupt"] = True
+            result["on_task"] = False
+        elif "should_interrupt" not in result:
+            result["should_interrupt"] = not bool(result.get("on_task", True))
         result["model"] = model
         result["judgement_status"] = "ok"
         record_ai_success(model)

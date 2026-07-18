@@ -10,6 +10,7 @@ import {
   exportDataset,
   getDatasetImageUrl,
   getDatasetSamples,
+  getGuardianImageUrl,
   openDatasetFolder,
   updateDatasetSample
 } from './api'
@@ -70,18 +71,20 @@ function App() {
   const [modelOptions, setModelOptions] = useState([])
   const [supervisionLevelOptions, setSupervisionLevelOptions] = useState([])
   const [selectedModel, setSelectedModel] = useState('')
-  const [selectedSupervisionLevel, setSelectedSupervisionLevel] = useState('task_related')
+  const [selectedSupervisionLevel, setSelectedSupervisionLevel] = useState('not_entertainment')
   const [nudgePrompt, setNudgePrompt] = useState('')
   const [defaultInterval, setDefaultInterval] = useState('300')
   const [defaultTriggerThreshold, setDefaultTriggerThreshold] = useState('1')
   const [whitelistText, setWhitelistText] = useState('')
   const [guardianEnabled, setGuardianEnabled] = useState(true)
   const [guardianInterval, setGuardianInterval] = useState('300')
+  const [datasetTagOptions, setDatasetTagOptions] = useState(['guardian mode'])
+  const [datasetTagOptionsText, setDatasetTagOptionsText] = useState('guardian mode')
   const [settingsStatus, setSettingsStatus] = useState('')
   const [datasetSamples, setDatasetSamples] = useState([])
   const [datasetIndex, setDatasetIndex] = useState(0)
   const [datasetLabelFilter, setDatasetLabelFilter] = useState('')
-  const [datasetReviewedFilter, setDatasetReviewedFilter] = useState('')
+  const [datasetReviewedFilter, setDatasetReviewedFilter] = useState('unreviewed')
   const [datasetActivity, setDatasetActivity] = useState('')
   const [datasetNotes, setDatasetNotes] = useState('')
   const [datasetStatus, setDatasetStatus] = useState('')
@@ -195,13 +198,15 @@ function App() {
           setModelOptions(d.model_options || [])
           setSupervisionLevelOptions(d.supervision_level_options || [])
           setSelectedModel(d.settings?.model || '')
-          setSelectedSupervisionLevel(d.settings?.supervision_level || 'task_related')
+          setSelectedSupervisionLevel(d.settings?.supervision_level || 'not_entertainment')
           setNudgePrompt(d.settings?.nudge_prompt || '')
           setDefaultInterval(String(d.settings?.default_check_interval_seconds || 300))
           setDefaultTriggerThreshold(String(d.settings?.trigger_threshold || 1))
           setWhitelistText((d.settings?.whitelist_behaviors || []).join('\n'))
           setGuardianEnabled(Boolean(d.settings?.guardian_mode_enabled ?? true))
           setGuardianInterval(String(d.settings?.guardian_check_interval_seconds || 300))
+          setDatasetTagOptions(d.settings?.dataset_tag_options || ['guardian mode'])
+          setDatasetTagOptionsText((d.settings?.dataset_tag_options || ['guardian mode']).join('\n'))
           setSettingsStatus('')
         })
         .catch(() => setSettingsStatus('设置读取失败'))
@@ -210,6 +215,12 @@ function App() {
 
   useEffect(() => {
     if (tab === 'dataset') {
+      getSettings()
+        .then((d) => {
+          setDatasetTagOptions(d.settings?.dataset_tag_options || ['guardian mode'])
+          setDatasetTagOptionsText((d.settings?.dataset_tag_options || ['guardian mode']).join('\n'))
+        })
+        .catch(() => {})
       refreshDataset()
     }
   }, [tab, datasetLabelFilter, datasetReviewedFilter])
@@ -234,7 +245,7 @@ function App() {
       if (e.key.toLowerCase() === 'a') document.getElementById('dataset-activity')?.focus()
       if (e.key.toLowerCase() === 'n') document.getElementById('dataset-notes')?.focus()
       if (e.key === 'ArrowLeft') setDatasetIndex((i) => Math.max(0, i - 1))
-      if (e.key === 'ArrowRight') setDatasetIndex((i) => Math.min(datasetSamples.length - 1, i + 1))
+      if (e.key === 'ArrowRight') setDatasetIndex((i) => Math.min(Math.max(0, datasetSamples.length - 1), i + 1))
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -276,12 +287,38 @@ function App() {
 
   const currentDatasetSample = datasetSamples[datasetIndex]
 
+  const datasetSampleMatchesFilters = (sample) => {
+    if (!sample) return false
+    if (datasetLabelFilter && sample.distraction_label !== datasetLabelFilter) return false
+    if (datasetReviewedFilter === 'reviewed' && !sample.reviewed) return false
+    if (datasetReviewedFilter === 'unreviewed' && sample.reviewed) return false
+    return true
+  }
+
+  const getDatasetSampleTags = (sample) => {
+    const sampleTags = Array.isArray(sample?.tags) ? sample.tags.filter(Boolean) : []
+    return sampleTags
+  }
+
+  const labelButtonClass = (label) => (
+    currentDatasetSample?.distraction_label === label ? 'btn-secondary chip-active' : 'btn-secondary'
+  )
+
+  const applyDatasetSampleUpdate = (updated, message) => {
+    const keep = datasetSampleMatchesFilters(updated)
+    const next = keep
+      ? datasetSamples.map((s) => (s.id === updated.id ? updated : s))
+      : datasetSamples.filter((s) => s.id !== updated.id)
+    setDatasetSamples(next)
+    setDatasetIndex((i) => Math.min(i, Math.max(0, next.length - 1)))
+    setDatasetStatus(message)
+  }
+
   const updateCurrentDatasetLabel = async (label) => {
     if (!currentDatasetSample) return
     try {
       const updated = await updateDatasetSample(currentDatasetSample.id, { distraction_label: label })
-      setDatasetSamples((samples) => samples.map((s) => (s.id === updated.id ? updated : s)))
-      setDatasetStatus('标签已保存')
+      applyDatasetSampleUpdate(updated, '标签已保存')
     } catch (e) {
       setDatasetStatus(e.message || '标签保存失败')
     }
@@ -291,8 +328,7 @@ function App() {
     if (!currentDatasetSample) return
     try {
       const updated = await updateDatasetSample(currentDatasetSample.id, { reviewed: !currentDatasetSample.reviewed })
-      setDatasetSamples((samples) => samples.map((s) => (s.id === updated.id ? updated : s)))
-      setDatasetStatus(updated.reviewed ? '已标记 reviewed' : '已取消 reviewed')
+      applyDatasetSampleUpdate(updated, updated.reviewed ? '已标记 reviewed' : '已取消 reviewed')
     } catch (e) {
       setDatasetStatus(e.message || 'reviewed 更新失败')
     }
@@ -305,10 +341,26 @@ function App() {
         activity: datasetActivity,
         label_notes: datasetNotes,
       })
-      setDatasetSamples((samples) => samples.map((s) => (s.id === updated.id ? updated : s)))
-      setDatasetStatus('样本已保存')
+      applyDatasetSampleUpdate(updated, '样本已保存')
     } catch (e) {
       setDatasetStatus(e.message || '样本保存失败')
+    }
+  }
+
+  const toggleCurrentDatasetTag = async (tag) => {
+    if (!currentDatasetSample) return
+    const cleanTag = String(tag || '').trim()
+    if (!cleanTag) return
+    const currentTags = getDatasetSampleTags(currentDatasetSample)
+    const hasTag = currentTags.some((item) => item.toLowerCase() === cleanTag.toLowerCase())
+    const nextTags = hasTag
+      ? currentTags.filter((item) => item.toLowerCase() !== cleanTag.toLowerCase())
+      : [...currentTags, cleanTag]
+    try {
+      const updated = await updateDatasetSample(currentDatasetSample.id, { tags: nextTags })
+      applyDatasetSampleUpdate(updated, '任务标签已保存')
+    } catch (e) {
+      setDatasetStatus(e.message || '任务标签保存失败')
     }
   }
 
@@ -328,9 +380,11 @@ function App() {
   const captureDataset = async (label) => {
     try {
       const result = await captureDatasetSample(label)
-      setDatasetSamples((samples) => [result.sample, ...samples])
-      setDatasetIndex(0)
-      setDatasetStatus(`已截图：${label}`)
+      if (datasetSampleMatchesFilters(result.sample)) {
+        setDatasetSamples((samples) => [result.sample, ...samples])
+        setDatasetIndex(0)
+      }
+      setDatasetStatus(`已截图：${label}${datasetSampleMatchesFilters(result.sample) ? '' : '（不在当前筛选中）'}`)
     } catch (e) {
       setDatasetStatus(e.message || '截图失败')
     }
@@ -356,6 +410,17 @@ function App() {
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean)
+
+  const parsePresetTags = (value) => {
+    const tags = value
+      .replace(/，/g, '\n')
+      .replace(/,/g, '\n')
+      .split('\n')
+      .map((tag) => tag.trim())
+      .filter(Boolean)
+    const hasGuardian = tags.some((tag) => tag.toLowerCase() === 'guardian mode')
+    return hasGuardian ? tags : ['guardian mode', ...tags]
+  }
 
   const handleStart = async () => {
     setFormError('')
@@ -524,6 +589,7 @@ function App() {
           .filter(Boolean),
         guardian_mode_enabled: guardianEnabled,
         guardian_check_interval_seconds: guardianIntervalSeconds,
+        dataset_tag_options: parsePresetTags(datasetTagOptionsText),
         strict_mode_enabled: true,
       })
       setSettings(res.settings)
@@ -532,6 +598,8 @@ function App() {
       setWhitelistText((res.settings?.whitelist_behaviors || []).join('\n'))
       setGuardianEnabled(Boolean(res.settings?.guardian_mode_enabled ?? guardianEnabled))
       setGuardianInterval(String(res.settings?.guardian_check_interval_seconds || guardianIntervalSeconds))
+      setDatasetTagOptions(res.settings?.dataset_tag_options || ['guardian mode'])
+      setDatasetTagOptionsText((res.settings?.dataset_tag_options || ['guardian mode']).join('\n'))
       setSettingsStatus('已保存，下一次 AI 判定生效。')
       setAiStatus(await getAiStatus())
     } catch (e) {
@@ -567,6 +635,16 @@ function App() {
 
   const flowStatus = status?.flow_status
   const strictStatus = status?.strict_status
+  const guardianStatus = status?.guardian_status
+  const guardianJudgement = guardianStatus?.latest_judgement
+  const guardianBreakStatus = guardianStatus?.break_status
+  const guardianStateLabel = guardianBreakStatus?.active
+    ? '休息中'
+    : guardianStatus?.paused_by_session
+    ? 'Session 中暂停'
+    : guardianStatus?.effective_enabled
+      ? '运行中'
+      : '关闭'
 
   const blockStart = (b) => b.actual_start || b.planned_start
   const blockEnd = (b) => b.actual_end || b.planned_end
@@ -638,6 +716,38 @@ function App() {
 
       {tab === 'session' && (
         <>
+          <section className={`status-panel guardian-panel ${guardianJudgement?.should_interrupt ? 'guardian-alert' : ''}`}>
+            <div className="status-header">
+              <div className="status-badge">Guardian mode：{guardianStateLabel}</div>
+              <div className="flow-timer">{guardianStatus?.check_interval_seconds || '--'}s</div>
+            </div>
+            <div className="status-info">
+              <div className="info-item">
+                <span className="label">最近检查</span>
+                <span className="value">{guardianStatus?.last_checked_at ? new Date(guardianStatus.last_checked_at).toLocaleString() : '等待首次检查'}</span>
+              </div>
+              <div className="info-item">
+                <span className="label">是否打断</span>
+                <span className={`value ${guardianJudgement?.should_interrupt ? 'danger' : ''}`}>
+                  {guardianJudgement ? (guardianJudgement.should_interrupt ? '是' : '否') : '--'}
+                </span>
+              </div>
+              <div className="info-item"><span className="label">当前活动</span><span className="value">{guardianJudgement?.current_activity || '--'}</span></div>
+              <div className="info-item"><span className="label">理由</span><span className="value">{guardianJudgement?.reason || '--'}</span></div>
+              {guardianBreakStatus?.active && (
+                <div className="info-item">
+                  <span className="label">休息剩余</span>
+                  <span className="value timer">{formatTime(guardianBreakStatus.remaining_seconds || 0)}</span>
+                </div>
+              )}
+            </div>
+            {guardianStatus?.latest_screenshot_url && (
+              <div className="guardian-preview">
+                <img src={getGuardianImageUrl(guardianStatus)} alt="Guardian latest screenshot" />
+              </div>
+            )}
+          </section>
+
           {!isRunning && flowStatus?.active && (
             <section className={`status-panel flow-${flowStatus.kind}`}>
               <div className="status-header">
@@ -921,10 +1031,10 @@ function App() {
           </div>
 
           <div className="dataset-capture-row">
-            <button className="btn-secondary" onClick={() => captureDataset('on_task')}>Ctrl+Alt+1 / on_task</button>
-            <button className="btn-secondary" onClick={() => captureDataset('off_task')}>Ctrl+Alt+2 / off_task</button>
-            <button className="btn-secondary" onClick={() => captureDataset('ambiguous')}>Ctrl+Alt+3 / ambiguous</button>
-            <button className="btn-secondary" onClick={() => captureDataset('unlabeled')}>Ctrl+Alt+0 / unlabeled</button>
+            <button className="btn-secondary" onClick={() => captureDataset('on_task')}>1 on_task</button>
+            <button className="btn-secondary" onClick={() => captureDataset('off_task')}>2 off_task</button>
+            <button className="btn-secondary" onClick={() => captureDataset('ambiguous')}>3 ambiguous</button>
+            <button className="btn-secondary" onClick={() => captureDataset('unlabeled')}>0 unlabeled</button>
           </div>
 
           <div className="input-row">
@@ -948,6 +1058,26 @@ function App() {
             </div>
           </div>
 
+          {datasetSamples.length > 0 && (
+            <div className="dataset-list">
+              {datasetSamples.map((sample, i) => (
+                <button
+                  key={sample.id}
+                  type="button"
+                  className={i === datasetIndex ? 'dataset-list-item selected' : 'dataset-list-item'}
+                  onClick={() => setDatasetIndex(i)}
+                >
+                  <span className="dataset-list-index">{i + 1}</span>
+                  <span className="dataset-list-main">
+                    <span>{sample.distraction_label}{sample.reviewed ? ' · reviewed' : ' · unreviewed'}</span>
+                    <span>{getDatasetSampleTags(sample).join(', ') || '未设置任务标签'} · {sample.activity || sample.task || 'unspecified'}</span>
+                  </span>
+                  <span className="dataset-list-time">{new Date(sample.captured_at).toLocaleTimeString()}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           {currentDatasetSample ? (
             <div className="dataset-layout">
               <div className="dataset-preview">
@@ -960,31 +1090,60 @@ function App() {
                 </div>
                 <div className="info-item"><span className="label">任务</span><span className="value">{currentDatasetSample.task}</span></div>
                 <div className="info-item"><span className="label">当前标签</span><span className="value">{currentDatasetSample.distraction_label}</span></div>
-                <div className="label-button-row">
-                  <button className="btn-secondary" onClick={() => updateCurrentDatasetLabel('on_task')}>1 on_task</button>
-                  <button className="btn-secondary" onClick={() => updateCurrentDatasetLabel('off_task')}>2 off_task</button>
-                  <button className="btn-secondary" onClick={() => updateCurrentDatasetLabel('ambiguous')}>3 ambiguous</button>
-                  <button className="btn-secondary" onClick={() => updateCurrentDatasetLabel('unlabeled')}>unlabeled</button>
+                <div className="dataset-editor-group">
+                  <label>分心标签</label>
+                  <div className="label-button-row compact">
+                    <button className={labelButtonClass('on_task')} onClick={() => updateCurrentDatasetLabel('on_task')}>1 on_task</button>
+                    <button className={labelButtonClass('off_task')} onClick={() => updateCurrentDatasetLabel('off_task')}>2 off_task</button>
+                    <button className={labelButtonClass('ambiguous')} onClick={() => updateCurrentDatasetLabel('ambiguous')}>3 ambiguous</button>
+                    <button className={labelButtonClass('unlabeled')} onClick={() => updateCurrentDatasetLabel('unlabeled')}>unlabeled</button>
+                  </div>
+                </div>
+                <div className="dataset-editor-group">
+                  <label>任务标签</label>
+                  <div className="dataset-tag-row">
+                    {datasetTagOptions.map((tag) => {
+                      const active = getDatasetSampleTags(currentDatasetSample).some((item) => item.toLowerCase() === tag.toLowerCase())
+                      return (
+                        <button
+                          key={tag}
+                          type="button"
+                          className={active ? 'tag-chip active' : 'tag-chip'}
+                          onClick={() => toggleCurrentDatasetTag(tag)}
+                        >
+                          {tag}
+                        </button>
+                      )
+                    })}
+                  </div>
                 </div>
                 <div className="input-group">
-                  <label>Activity</label>
-                  <input id="dataset-activity" value={datasetActivity} onChange={(e) => setDatasetActivity(e.target.value)} />
+                  <label>画面/行为描述</label>
+                  <input
+                    id="dataset-activity"
+                    value={datasetActivity}
+                    onChange={(e) => setDatasetActivity(e.target.value)}
+                    placeholder="例如：读论文 / 看小说 / 写代码 / 查资料"
+                  />
                 </div>
                 <div className="input-group">
-                  <label>Notes</label>
-                  <textarea id="dataset-notes" value={datasetNotes} onChange={(e) => setDatasetNotes(e.target.value)} />
+                  <label>备注/判断理由</label>
+                  <textarea
+                    id="dataset-notes"
+                    value={datasetNotes}
+                    onChange={(e) => setDatasetNotes(e.target.value)}
+                    placeholder="例如：边界情况、为什么这样标、需要之后复核的点"
+                  />
                 </div>
-                <div className="button-row">
-                  <button className="btn-secondary" onClick={() => setDatasetIndex((i) => Math.max(0, i - 1))}>Previous</button>
-                  <button className="btn-secondary" onClick={() => setDatasetIndex((i) => Math.min(datasetSamples.length - 1, i + 1))}>Next</button>
+                <div className="dataset-nav-row">
+                  <button className="btn-secondary" onClick={() => setDatasetIndex((i) => Math.max(0, i - 1))}>上一张</button>
+                  <button className="btn-secondary" onClick={() => setDatasetIndex((i) => Math.min(datasetSamples.length - 1, i + 1))}>下一张</button>
                 </div>
-                <div className="button-row">
-                  <button className="btn-start" onClick={saveCurrentDatasetSample}>Save</button>
-                  <button className="btn-secondary" onClick={toggleCurrentReviewed}>{currentDatasetSample.reviewed ? 'Unreview' : 'Mark reviewed'}</button>
-                </div>
-                <div className="button-row">
-                  <button className="btn-secondary" onClick={() => openDatasetFolder(currentDatasetSample.id).catch((e) => setDatasetStatus(e.message || '打开文件夹失败'))}>Open screenshot folder</button>
-                  <button className="btn-stop" onClick={deleteCurrentDatasetSample}>Delete sample</button>
+                <div className="dataset-action-grid">
+                  <button className="btn-start" onClick={saveCurrentDatasetSample}>保存</button>
+                  <button className="btn-secondary" onClick={toggleCurrentReviewed}>{currentDatasetSample.reviewed ? '取消 reviewed' : '标记 reviewed'}</button>
+                  <button className="btn-secondary" onClick={() => openDatasetFolder(currentDatasetSample.id).catch((e) => setDatasetStatus(e.message || '打开文件夹失败'))}>打开截图文件夹</button>
+                  <button className="btn-stop" onClick={deleteCurrentDatasetSample}>删除样本</button>
                 </div>
                 {currentDatasetSample.ai_model && (
                   <p className="settings-current">AI: {currentDatasetSample.ai_model} · {currentDatasetSample.ai_confidence ?? '--'}</p>
@@ -996,8 +1155,8 @@ function App() {
           )}
 
           <div className="button-row dataset-bottom-actions">
-            <button className="btn-secondary" onClick={handleDatasetExport}>Export JSONL</button>
-            <button className="btn-secondary" onClick={() => openDatasetFolder().catch((e) => setDatasetStatus(e.message || '打开文件夹失败'))}>Open dataset folder</button>
+            <button className="btn-secondary" onClick={handleDatasetExport}>导出 JSONL</button>
+            <button className="btn-secondary" onClick={() => openDatasetFolder().catch((e) => setDatasetStatus(e.message || '打开文件夹失败'))}>打开数据集文件夹</button>
           </div>
           {datasetStatus && <p className="settings-status">{datasetStatus}</p>}
         </section>
@@ -1081,6 +1240,17 @@ function App() {
             </div>
             <p className="settings-current">
               Session 模式用于正在运行的任务；白名单行为优先于 Session 档位，但小说、漫画和色情内容仍会被硬拦截。
+            </p>
+            <div className="input-group">
+              <label>Dataset 任务标签（每行一条）</label>
+              <textarea
+                value={datasetTagOptionsText}
+                onChange={(e) => setDatasetTagOptionsText(e.target.value)}
+                placeholder="guardian mode&#10;论文阅读&#10;日语学习&#10;产品开发"
+              />
+            </div>
+            <p className="settings-current">
+              Dataset 页会把这些标签显示成可点击按钮；新截图默认带 guardian mode。
             </p>
           </div>
           <div className="strict-box">

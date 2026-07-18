@@ -47,13 +47,14 @@ DEFAULT_SETTINGS = {
     "model": "google/gemini-2.5-flash-lite",
     "strict_mode_enabled": True,
     "strict_locked_until": None,
-    "supervision_level": "task_related",
+    "supervision_level": "not_entertainment",
     "nudge_prompt": DEFAULT_NUDGE_PROMPT,
     "default_check_interval_seconds": 300,
     "trigger_threshold": 1,
     "whitelist_behaviors": ["听音乐"],
     "guardian_mode_enabled": True,
     "guardian_check_interval_seconds": 300,
+    "dataset_tag_options": ["guardian mode"],
     "dataset_retention_days": None,
 }
 
@@ -100,6 +101,10 @@ def load_settings() -> dict:
     settings["whitelist_behaviors"] = _normalize_string_list(settings.get("whitelist_behaviors", []))
     if not settings["whitelist_behaviors"]:
         settings["whitelist_behaviors"] = DEFAULT_SETTINGS["whitelist_behaviors"].copy()
+
+    settings["dataset_tag_options"] = _normalize_string_list(settings.get("dataset_tag_options", []))
+    if "guardian mode" not in {tag.lower() for tag in settings["dataset_tag_options"]}:
+        settings["dataset_tag_options"] = ["guardian mode", *settings["dataset_tag_options"]]
 
     settings["guardian_mode_enabled"] = bool(settings.get("guardian_mode_enabled", True))
     try:
@@ -198,6 +203,16 @@ def save_settings(settings_update: dict) -> dict:
             raise ValueError("Guardian mode 检测间隔不能少于 30 秒。")
         settings["guardian_check_interval_seconds"] = value
 
+    if "dataset_tag_options" in settings_update:
+        tags = _normalize_string_list(settings_update["dataset_tag_options"])
+        if "guardian mode" not in {tag.lower() for tag in tags}:
+            tags = ["guardian mode", *tags]
+        if len(tags) > 100:
+            raise ValueError("数据集任务标签最多支持 100 个。")
+        if any(len(item) > 80 for item in tags):
+            raise ValueError("单个数据集任务标签不能超过 80 个字符。")
+        settings["dataset_tag_options"] = tags
+
     if "dataset_retention_days" in settings_update:
         value = settings_update["dataset_retention_days"]
         if value in (None, "", 0):
@@ -243,6 +258,10 @@ def get_default_trigger_threshold() -> int:
 
 def get_whitelist_behaviors() -> list:
     return load_settings()["whitelist_behaviors"]
+
+
+def get_dataset_tag_options() -> list:
+    return load_settings()["dataset_tag_options"]
 
 
 def is_guardian_mode_enabled() -> bool:

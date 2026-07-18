@@ -113,6 +113,7 @@ class SettingsRequest(BaseModel):
     whitelist_behaviors: Optional[List[str]] = None
     guardian_mode_enabled: Optional[bool] = None
     guardian_check_interval_seconds: Optional[int] = None
+    dataset_tag_options: Optional[List[str]] = None
     dataset_retention_days: Optional[int] = None
 
 
@@ -164,12 +165,14 @@ class RecoveryBreakRequest(BaseModel):
 
 class DatasetCaptureRequest(BaseModel):
     label: str = "unlabeled"
+    tags: Optional[List[str]] = None
 
 
 class DatasetUpdateRequest(BaseModel):
     activity: Optional[str] = None
     distraction_label: Optional[str] = None
     label_notes: Optional[str] = None
+    tags: Optional[List[str]] = None
     reviewed: Optional[bool] = None
     ai_on_task: Optional[bool] = None
     ai_confidence: Optional[float] = None
@@ -271,6 +274,26 @@ async def recovery_break(req: RecoveryBreakRequest):
     return {"status": "break_started"}
 
 
+@app.post("/guardian/recovery/work")
+async def guardian_recovery_work(req: RecoveryWorkRequest):
+    try:
+        guardian_manager.return_to_work(req.minimum_next_step)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "work_selected"}
+
+
+@app.post("/guardian/recovery/break")
+async def guardian_recovery_break(req: RecoveryBreakRequest):
+    if req.break_minutes <= 0:
+        raise HTTPException(status_code=400, detail="休息时长需要是正整数。")
+    try:
+        payload = guardian_manager.start_break(req.break_minutes, req.minimum_next_step)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "break_started", "break": payload}
+
+
 # --- Flow Schedule APIs ---
 
 @app.post("/flow/continue")
@@ -361,6 +384,16 @@ async def api_ai_status():
     return get_ai_status()
 
 
+@app.get("/guardian/latest-screenshot")
+async def api_guardian_latest_screenshot():
+    screenshot_path = guardian_manager.latest_screenshot_path
+    if not screenshot_path:
+        raise HTTPException(status_code=404, detail="No Guardian screenshot yet.")
+    if not os.path.exists(screenshot_path):
+        raise HTTPException(status_code=404, detail="Guardian screenshot not found.")
+    return FileResponse(screenshot_path, media_type="image/jpeg")
+
+
 # --- Dataset APIs ---
 
 @app.post("/dataset/capture")
@@ -371,7 +404,7 @@ async def api_dataset_capture(req: DatasetCaptureRequest):
     task = session_manager.task if session_manager.active and session_manager.task else "unspecified"
     session_id = session_manager.session_id if session_manager.active else None
     try:
-        sample = create_sample(task=task, label=label, session_id=session_id, source="hotkey")
+        sample = create_sample(task=task, label=label, session_id=session_id, tags=req.tags, source="hotkey")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Capture failed: {e}")
     return {"status": "captured", "sample": sample}
