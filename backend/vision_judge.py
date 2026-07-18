@@ -11,9 +11,10 @@ from ai_status_manager import (
     record_ai_error,
     record_ai_success,
 )
-from settings_manager import get_selected_model
+from settings_manager import get_selected_model, get_supervision_rules
+from data_paths import ENV_FILE
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(dotenv_path=ENV_FILE)
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -27,8 +28,10 @@ The user's declared task is:
 
 Look at the screenshot and judge whether the user is currently working on the declared task.
 
+{supervision_rules}
+
 Important rules:
-- If the user is watching short videos, social media, entertainment content, games, shopping, or unrelated websites, mark on_task as false.
+- If the user is reading novels, reading manga/comics, viewing porn/adult websites, watching short videos, using social media, consuming entertainment content, playing games, shopping, or using unrelated websites, mark on_task as false unless the supervision rules explicitly allow it.
 - If the user is reading documents, writing notes, using educational websites, coding related to the task, or solving problems related to the declared task, mark on_task as true.
 - If unsure, use the screenshot content and the user's declared task to make the best judgement.
 - Be strict but reasonable.
@@ -68,6 +71,39 @@ Return JSON only:
 }}"""
 
 
+GUARDIAN_PROMPT_TEMPLATE = """You are Guardian mode for a local focus assistant.
+
+Guardian mode is always-on and only detects obvious entertainment or adult distractions.
+It does not judge whether work is related to a declared task.
+
+{whitelist_context}
+
+Look at the screenshot and decide whether Guardian mode should interrupt the user.
+
+Interrupt only for clearly visible:
+- porn or adult sexual content
+- reading novels or web novels for entertainment
+- reading manga or comics for entertainment
+- playing or watching games as entertainment
+
+Do not interrupt for normal work, study, coding, writing, documentation, chat about work, music players, timers, utilities, or ambiguous screens.
+If a visible activity clearly matches the user-defined whitelist, do not interrupt unless it is porn/adult sexual content.
+If unsure, do not interrupt.
+
+Return JSON only:
+{{
+  "should_interrupt": true or false,
+  "confidence": number between 0 and 1,
+  "current_activity": "short description of what the user is doing",
+  "reason": "short explanation"
+}}
+
+Meaning:
+- should_interrupt=true only for the explicit Guardian categories above.
+- should_interrupt=false for papers, articles, search pages, normal work/study, ambiguous reading, or anything that is not clearly entertainment/adult content.
+"""
+
+
 def _format_memory_context(memory: list) -> str:
     """Format dispute memory into context for the prompt."""
     if not memory:
@@ -77,6 +113,17 @@ def _format_memory_context(memory: list) -> str:
     for entry in memory[-10:]:  # Last 10 entries to avoid too long context
         lines.append(f"- Activity: \"{entry.get('activity', '')}\" → Reason: \"{entry.get('user_reason', '')}\"")
 
+    return "\n".join(lines)
+
+
+def _format_whitelist_context() -> str:
+    from settings_manager import get_whitelist_behaviors
+
+    whitelist = get_whitelist_behaviors()
+    if not whitelist:
+        return "User-defined whitelist behaviors: none."
+    lines = ["User-defined whitelist behaviors:"]
+    lines.extend(f"- {item}" for item in whitelist)
     return "\n".join(lines)
 
 
@@ -133,7 +180,7 @@ def _get_client():
     )
 
 
-def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> dict:
+def judge_screenshot(task: str, screenshot_path: str, memory: list = None, supervision_level: str = None) -> dict:
     """Judge whether the user is on task based on a screenshot."""
     model = get_selected_model()
 
@@ -148,6 +195,7 @@ def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> di
         return _api_error_result(task, error, model=model)
 
     memory_context = _format_memory_context(memory or [])
+    supervision_rules = get_supervision_rules(supervision_level)
 
     try:
         client = _get_client()
@@ -164,7 +212,11 @@ def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> di
                     "content": [
                         {
                             "type": "text",
-                            "text": PROMPT_TEMPLATE.format(task=task, memory_context=memory_context),
+                            "text": PROMPT_TEMPLATE.format(
+                                task=task,
+                                memory_context=memory_context,
+                                supervision_rules=supervision_rules,
+                            ),
                         },
                         {
                             "type": "image_url",
@@ -196,6 +248,73 @@ def judge_screenshot(task: str, screenshot_path: str, memory: list = None) -> di
         print("[vision_judge] Pausing this judgement instead of using random mock mode.")
         record_ai_error(error, model=model)
         return _api_error_result(task, error, model=model)
+
+
+def judge_guardian_screenshot(screenshot_path: str) -> dict:
+    """Judge whether always-on Guardian mode should interrupt obvious entertainment."""
+    model = get_selected_model()
+
+    if is_mock_enabled():
+        result = _mock_judge("Guardian mode")
+        result["on_task"] = bool(result.get("on_task", True))
+        return result
+
+    if not has_api_key():
+        error = "No valid OpenRouter API key configured."
+        print(f"[vision_judge] {error}")
+        record_ai_error(error, model=model)
+        return _api_error_result("Guardian mode", error, model=model)
+
+    try:
+        client = _get_client()
+        print(f"[vision_judge] Using model for guardian: {model}")
+
+        with open(screenshot_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": GUARDIAN_PROMPT_TEMPLATE.format(
+                                whitelist_context=_format_whitelist_context()
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}",
+                                "detail": "low",
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=250,
+        )
+
+        content = response.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1]
+            content = content.rsplit("```", 1)[0]
+
+        result = json.loads(content)
+        if "should_interrupt" in result:
+            result["on_task"] = not bool(result["should_interrupt"])
+        result["model"] = model
+        result["judgement_status"] = "ok"
+        record_ai_success(model)
+        return result
+
+    except Exception as e:
+        error = str(e)
+        print(f"[vision_judge] Guardian error calling OpenRouter API: {error}")
+        record_ai_error(error, model=model)
+        return _api_error_result("Guardian mode", error, model=model)
 
 
 def evaluate_dispute(task: str, activity: str, original_reason: str, user_reason: str, memory: list = None) -> dict:

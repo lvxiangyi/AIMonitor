@@ -131,6 +131,27 @@ def _raise_window(root):
         pass
 
 
+def _keyboard_layout_label():
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        thread_id = user32.GetWindowThreadProcessId(hwnd, None) if hwnd else 0
+        hkl = user32.GetKeyboardLayout(thread_id)
+        lang_id = hkl & 0xFFFF
+    except Exception:
+        return "Input language: unknown"
+
+    names = {
+        0x0409: "English - US",
+        0x0809: "English - UK",
+        0x0411: "Japanese",
+        0x0804: "Chinese - Simplified",
+        0x0404: "Chinese - Traditional",
+        0x0412: "Korean",
+    }
+    return f"Input language: {names.get(lang_id, 'Unknown')} (0x{lang_id:04X})"
+
+
 def _force_window_rect(root, rect, activate=True):
     left, top, width, height = rect
     root.geometry(f"{width}x{height}+{left}+{top}")
@@ -197,14 +218,22 @@ class BlockerWindow:
         if self._root:
             self._root.after(100, self._process_queue)
 
-    def show(self, task: str, activity: str, reason: str):
+    def show(
+        self,
+        task: str,
+        activity: str,
+        reason: str,
+        strict_mode: bool = False,
+        nudge_message: str = "",
+        recovery: bool = True,
+    ):
         """Show the blocker window with a quiz."""
         if self._is_showing:
             return
         self._is_showing = True
         self._task = task
         # Queue the show command to run on tkinter thread
-        self._command_queue.put(lambda: self._do_show(task, activity, reason))
+        self._command_queue.put(lambda: self._do_show(task, activity, reason, strict_mode, nudge_message, recovery))
 
     def show_message(self, title: str, message: str):
         """Show a dismissible desktop message."""
@@ -226,6 +255,16 @@ class BlockerWindow:
         self._is_showing = True
         self._command_queue.put(lambda: self._do_show_resume_prompt(payload))
 
+    def show_break_end_translation(self, payload: dict):
+        """Force a translation challenge before resuming after a strict break."""
+        self._is_showing = True
+        self._command_queue.put(lambda: self._do_show_break_end_translation(payload))
+
+    def show_stop_resume_prompt(self, payload: dict):
+        """Ask the user to start the next task after a stopped period."""
+        self._is_showing = True
+        self._command_queue.put(lambda: self._do_show_resume_prompt(payload, title="停止时间结束", endpoint="/flow/continue"))
+
     def dismiss(self):
         """Hide the blocker window."""
         if not self._is_showing:
@@ -237,7 +276,7 @@ class BlockerWindow:
     def is_showing(self):
         return self._is_showing
 
-    def _do_show(self, task, activity, reason):
+    def _do_show(self, task, activity, reason, strict_mode=False, nudge_message="", recovery=True):
         """Show window and load quiz (runs on tk thread)."""
         # Force fullscreen size again in case resolution changed.
         rect = _virtual_screen_rect()
@@ -252,8 +291,11 @@ class BlockerWindow:
         self._root.attributes("-topmost", True)
         self._root.lift()
         self._root.focus_force()
-        self._grab_modal()
-        self._load_quiz(task, activity, reason)
+        self._grab_modal(global_grab=not strict_mode)
+        if strict_mode:
+            self._load_translation_unlock(task, activity, reason, nudge_message=nudge_message, recovery=recovery)
+        else:
+            self._load_quiz(task, activity, reason)
 
     def _do_show_message(self, title, message):
         """Show a small dismissible message window (runs on tk thread)."""
@@ -320,7 +362,7 @@ class BlockerWindow:
         self._root.lift()
         self._root.focus_force()
         _raise_window(self._root)
-        self._grab_modal()
+        self._grab_modal(global_grab=False)
 
         frame = self._content_frame
         frame.place_forget()
@@ -328,7 +370,10 @@ class BlockerWindow:
 
         task = summary.get("task", "")
         duration = int(summary.get("duration_minutes") or 30)
-        interval = int(summary.get("check_interval_seconds") or 30)
+        interval = int(summary.get("check_interval_seconds") or 300)
+        trigger_threshold = int(summary.get("trigger_threshold") or 1)
+        tags = ", ".join(summary.get("tags", []))
+        strict_mode = bool(summary.get("strict_mode", False))
         focus_minutes = summary.get("focus_minutes", 0)
         distracted = summary.get("distracted_checks", 0)
         api_errors = summary.get("api_error_checks", 0)
@@ -377,6 +422,12 @@ class BlockerWindow:
         )
         continue_duration.insert(0, str(duration))
         continue_duration.pack(side="left", padx=(_s(8), _s(12)))
+        continue_tags = tk.Entry(
+            continue_box, font=("Segoe UI", _s(10)), width=_s(14), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
+        continue_tags.insert(0, tags)
+        continue_tags.pack(side="left", padx=(_s(0), _s(12)))
         tk.Button(
             duration_row,
             text="开始下一轮",
@@ -387,7 +438,9 @@ class BlockerWindow:
             padx=_s(14),
             pady=_s(5),
             cursor="hand2",
-            command=lambda: self._submit_continue(continue_task, continue_duration, interval, error_label),
+            command=lambda: self._submit_continue(
+                continue_task, continue_duration, interval, trigger_threshold, error_label, continue_tags, strict_mode
+            ),
         ).pack(side="right")
 
         break_box = tk.Frame(frame, bg="#15172a", padx=_s(14), pady=_s(12))
@@ -412,6 +465,12 @@ class BlockerWindow:
         )
         break_activity.insert(0, "散步 / 喝水 / 放松")
         break_activity.pack(fill="x", pady=(0, _s(8)))
+        break_tags = tk.Entry(
+            break_box, font=("Segoe UI", _s(10)), width=_s(48), bg="#0f0f23", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
+        break_tags.insert(0, "恢复")
+        break_tags.pack(fill="x", pady=(0, _s(8)))
         tk.Button(
             break_box,
             text="开始休息",
@@ -423,7 +482,7 @@ class BlockerWindow:
             pady=_s(5),
             cursor="hand2",
             command=lambda: self._submit_break(
-                break_minutes, break_activity, task, duration, interval, error_label
+                break_minutes, break_activity, task, duration, interval, trigger_threshold, error_label, break_tags, strict_mode
             ),
         ).pack(anchor="e")
 
@@ -451,11 +510,11 @@ class BlockerWindow:
             command=lambda: self._submit_pause_day(pause_activity, error_label),
         ).pack(anchor="e")
 
-    def _do_show_resume_prompt(self, payload):
+    def _do_show_resume_prompt(self, payload, title="休息结束", endpoint="/flow/resume"):
         """Render break-finished confirmation (runs on tk thread)."""
         self._clear_content()
         monitor_rect = _cursor_monitor_rect()
-        width, height = _clamp_dialog_size(monitor_rect, _s(560), _s(320))
+        width, height = _clamp_dialog_size(monitor_rect, _s(600), _s(420))
         rect = _centered_rect(monitor_rect, width, height)
         _force_window_rect(self._root, rect)
         self._root.deiconify()
@@ -463,7 +522,7 @@ class BlockerWindow:
         self._root.lift()
         self._root.focus_force()
         _raise_window(self._root)
-        self._grab_modal()
+        self._grab_modal(global_grab=False)
 
         frame = self._content_frame
         frame.place_forget()
@@ -471,16 +530,19 @@ class BlockerWindow:
 
         task = payload.get("task", "")
         activity = payload.get("activity", "")
+        duration = int(payload.get("duration_minutes") or 30)
+        interval = int(payload.get("check_interval_seconds") or 300)
+        tags = ", ".join(payload.get("tags", []))
         error_label = tk.Label(
             frame, text="", font=("Segoe UI", _s(10)), fg="#ff8a80", bg="#0f0f23", wraplength=_s(500)
         )
 
         tk.Label(
-            frame, text="休息结束", font=("Segoe UI", _s(22), "bold"), fg="#ffffff", bg="#0f0f23"
+            frame, text=title, font=("Segoe UI", _s(22), "bold"), fg="#ffffff", bg="#0f0f23"
         ).pack(pady=(0, _s(10)))
         tk.Label(
             frame,
-            text=f"刚才休息：{activity}\n准备回到：{task}",
+            text=f"刚才：{activity}\n请输入接下来的任务和时间。",
             font=("Segoe UI", _s(12)),
             fg="#cbd5e1",
             bg="#0f0f23",
@@ -488,9 +550,33 @@ class BlockerWindow:
             justify="center",
         ).pack(pady=(0, _s(16)))
         error_label.pack(pady=(0, _s(8)))
+        next_task = tk.Entry(
+            frame, font=("Segoe UI", _s(12)), width=_s(42), bg="#15172a", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
+        next_task.insert(0, task)
+        next_task.pack(fill="x", pady=(0, _s(10)))
+        next_task.focus_set()
+        next_task.selection_range(0, tk.END)
+        row = tk.Frame(frame, bg="#0f0f23")
+        row.pack(fill="x", pady=(0, _s(10)))
+        tk.Label(row, text="分钟", font=("Segoe UI", _s(10)), fg="#cbd5e1", bg="#0f0f23").pack(side="left")
+        next_duration = tk.Entry(
+            row, font=("Segoe UI", _s(10)), width=_s(8), bg="#15172a", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
+        next_duration.insert(0, str(duration))
+        next_duration.pack(side="left", padx=(_s(8), _s(14)))
+        tk.Label(row, text="标签", font=("Segoe UI", _s(10)), fg="#cbd5e1", bg="#0f0f23").pack(side="left")
+        next_tags = tk.Entry(
+            row, font=("Segoe UI", _s(10)), width=_s(20), bg="#15172a", fg="#ffffff",
+            insertbackground="#ffffff", relief="flat",
+        )
+        next_tags.insert(0, tags)
+        next_tags.pack(side="left", padx=(_s(8), 0), fill="x", expand=True)
         tk.Button(
             frame,
-            text="确认，开始下一轮",
+            text="开始下一轮",
             font=("Segoe UI", _s(12), "bold"),
             fg="#ffffff",
             bg="#2ecc71",
@@ -498,10 +584,38 @@ class BlockerWindow:
             padx=_s(24),
             pady=_s(8),
             cursor="hand2",
-            command=lambda: self._post_flow("/flow/resume", payload, error_label),
+            command=lambda: self._submit_resume(payload, next_task, next_duration, interval, next_tags, error_label, endpoint),
         ).pack()
 
-    def _submit_continue(self, task_entry, duration_entry, interval, error_label):
+    def _do_show_break_end_translation(self, payload):
+        """Render a mandatory translation challenge before the resume prompt."""
+        self._clear_content()
+        monitor_rect = _cursor_monitor_rect()
+        width, height = _clamp_dialog_size(monitor_rect, _s(760), _s(620))
+        rect = _centered_rect(monitor_rect, width, height)
+        _force_window_rect(self._root, rect)
+        self._root.deiconify()
+        self._root.attributes("-topmost", True)
+        self._root.lift()
+        self._root.focus_force()
+        _raise_window(self._root)
+        self._grab_modal(global_grab=False)
+        self._content_frame.place_forget()
+        self._content_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self._load_translation_unlock(
+            payload.get("task", ""),
+            payload.get("activity", "休息结束"),
+            "休息时间已结束，请完成翻译题后回到学习。",
+            nudge_message=payload.get("minimum_next_step", ""),
+            resume_payload=payload,
+        )
+
+    def _parse_tags(self, tags_entry):
+        if not tags_entry:
+            return []
+        return [tag.strip() for tag in tags_entry.get().replace("，", ",").split(",") if tag.strip()]
+
+    def _submit_continue(self, task_entry, duration_entry, interval, trigger_threshold, error_label, tags_entry=None, strict_mode=False):
         task = task_entry.get().strip()
         if not task:
             error_label.config(text="请输入要继续的任务。")
@@ -517,9 +631,23 @@ class BlockerWindow:
             "task": task,
             "duration_minutes": duration,
             "check_interval_seconds": interval,
+            "trigger_threshold": trigger_threshold,
+            "tags": self._parse_tags(tags_entry),
+            "strict_mode": strict_mode,
         }, error_label)
 
-    def _submit_break(self, minutes_entry, activity_entry, task, duration, interval, error_label):
+    def _submit_break(
+        self,
+        minutes_entry,
+        activity_entry,
+        task,
+        duration,
+        interval,
+        trigger_threshold,
+        error_label,
+        tags_entry=None,
+        strict_mode=False,
+    ):
         try:
             minutes = int(minutes_entry.get().strip())
             if minutes <= 0:
@@ -537,7 +665,33 @@ class BlockerWindow:
             "task": task,
             "duration_minutes": duration,
             "check_interval_seconds": interval,
+            "trigger_threshold": trigger_threshold,
+            "tags": self._parse_tags(tags_entry),
+            "strict_mode": strict_mode,
         }, error_label)
+
+    def _submit_resume(self, payload, task_entry, duration_entry, interval, tags_entry, error_label, endpoint):
+        task = task_entry.get().strip()
+        if not task:
+            error_label.config(text="请输入接下来的任务。")
+            return
+        try:
+            duration = int(duration_entry.get().strip())
+            if duration <= 0:
+                raise ValueError()
+        except Exception:
+            error_label.config(text="下一轮分钟需要是正整数。")
+            return
+        resume_payload = payload.copy()
+        resume_payload.update({
+            "task": task,
+            "duration_minutes": duration,
+            "check_interval_seconds": interval,
+            "trigger_threshold": int(payload.get("trigger_threshold") or 1),
+            "tags": self._parse_tags(tags_entry),
+        })
+        print(f"[blocker] Resume submit endpoint={endpoint} task={task!r} duration={duration}")
+        self._post_flow(endpoint, resume_payload, error_label)
 
     def _submit_pause_day(self, activity_entry, error_label):
         activity = activity_entry.get().strip()
@@ -558,6 +712,7 @@ class BlockerWindow:
             from flow_prompt_store import clear_pending_flow
 
             clear_pending_flow()
+            print(f"[blocker] Flow post ok path={path} task={payload.get('task')!r}")
             self._command_queue.put(self._message_dismiss)
         except Exception as e:
             self._command_queue.put(lambda: error_label.config(text=f"操作失败：{e}"))
@@ -568,11 +723,14 @@ class BlockerWindow:
         self._clear_content()
         self._root.withdraw()
 
-    def _grab_modal(self):
+    def _grab_modal(self, global_grab=True):
         try:
-            self._root.grab_set_global()
+            if global_grab:
+                self._root.grab_set_global()
+            else:
+                self._root.grab_set()
         except Exception as e:
-            print(f"[blocker] Could not grab input globally: {e}")
+            print(f"[blocker] Could not grab input: {e}")
 
     def _release_modal(self):
         try:
@@ -619,6 +777,360 @@ class BlockerWindow:
                 "correct_index": 0,
                 "explanation": "\u30dd\u30e2\u30c9\u30fc\u30ed\u30fb\u30c6\u30af\u30cb\u30c3\u30af\u306f\u79d1\u5b66\u7684\u306b\u52b9\u679c\u304c\u5b9f\u8a3c\u3055\u308c\u3066\u3044\u307e\u3059\u3002"
             }
+
+    def _load_translation_unlock(self, task, activity, reason, nudge_message="", recovery=False, resume_payload=None):
+        """Show loading state then fetch a strict-mode translation challenge."""
+        self._clear_content()
+        frame = self._content_frame
+        tk.Label(
+            frame,
+            text="厳格モード：翻訳問題を読み込み中...",
+            font=("Segoe UI", 18),
+            fg="#f1c40f",
+            bg="#0f0f23",
+        ).pack(pady=50)
+        threading.Thread(
+            target=self._fetch_and_render_translation,
+            args=(task, activity, reason, nudge_message, recovery, resume_payload),
+            daemon=True,
+        ).start()
+
+    def _fetch_and_render_translation(self, task, activity, reason, nudge_message="", recovery=False, resume_payload=None):
+        try:
+            res = requests.get(f"{BACKEND_URL}/strict/translation", timeout=10)
+            challenge = res.json()
+        except Exception as e:
+            print(f"[blocker] Translation challenge fetch error: {e}")
+            challenge = {
+                "challenge_id": "fallback",
+                "source_text": "I will return to my task and work with focus.",
+                "instruction": "Translate this English sentence into Japanese.",
+            }
+        self._command_queue.put(
+            lambda: self._render_translation_unlock(
+                challenge,
+                task,
+                activity,
+                reason,
+                nudge_message=nudge_message,
+                recovery=recovery,
+                resume_payload=resume_payload,
+            )
+        )
+
+    def _render_translation_unlock(
+        self,
+        challenge,
+        task,
+        activity,
+        reason,
+        nudge_message="",
+        recovery=False,
+        resume_payload=None,
+    ):
+        """Render strict-mode English-to-Japanese unlock task."""
+        self._clear_content()
+        frame = self._content_frame
+
+        tk.Label(
+            frame,
+            text="厳格モード：分心を検出しました",
+            font=("Segoe UI", 24, "bold"),
+            fg="#f1c40f",
+            bg="#0f0f23",
+        ).pack(pady=(0, 8))
+        info = f"タスク：{task}"
+        if activity:
+            info += f"  |  検出：{activity}"
+        tk.Label(frame, text=info, font=("Segoe UI", 11), fg="#888", bg="#0f0f23").pack(pady=(0, 16))
+        tk.Label(
+            frame,
+            text="Translate the English sentence into Japanese. Romaji is accepted if IME is unavailable.",
+            font=("Segoe UI", 12),
+            fg="#cbd5e1",
+            bg="#0f0f23",
+            wraplength=760,
+            justify="center",
+        ).pack(pady=(0, 14))
+        if nudge_message:
+            tk.Label(
+                frame,
+                text=nudge_message,
+                font=("Segoe UI", 12),
+                fg="#f8fafc",
+                bg="#15172a",
+                wraplength=760,
+                justify="center",
+                padx=14,
+                pady=10,
+            ).pack(fill="x", pady=(0, 14))
+        language_label = tk.Label(
+            frame,
+            text=_keyboard_layout_label(),
+            font=("Segoe UI", 11, "bold"),
+            fg="#f1c40f",
+            bg="#0f0f23",
+        )
+        language_label.pack(pady=(0, 12))
+        self._refresh_language_label(language_label)
+        tk.Label(
+            frame,
+            text=challenge.get("source_text", ""),
+            font=("Segoe UI", 18, "bold"),
+            fg="#ffffff",
+            bg="#0f0f23",
+            wraplength=760,
+            justify="center",
+        ).pack(pady=(0, 16))
+
+        answer = tk.Text(
+            frame,
+            font=("Segoe UI", 15),
+            width=54,
+            height=3,
+            wrap="word",
+            bg="#1a1a2e",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            highlightthickness=1,
+            highlightcolor="#f1c40f",
+        )
+        answer.pack(pady=(0, 12))
+        answer.focus_set()
+
+        result_lbl = tk.Label(frame, text="", font=("Segoe UI", 12), fg="#cbd5e1", bg="#0f0f23", wraplength=700)
+        result_lbl.pack(pady=(0, 12))
+
+        button_row = tk.Frame(frame, bg="#0f0f23")
+        button_row.pack()
+
+        unlock_widgets = []
+
+        tk.Button(
+            button_row,
+            text="Submit",
+            font=("Segoe UI", 12, "bold"),
+            fg="#0f0f23",
+            bg="#f1c40f",
+            activebackground="#d4ac0d",
+            activeforeground="#0f0f23",
+            relief="flat",
+            padx=24,
+            pady=8,
+            cursor="hand2",
+            command=lambda: self._submit_translation_unlock(challenge, answer, result_lbl, unlock_widgets),
+        ).pack(side="left", padx=(0, 10))
+
+        tk.Button(
+            button_row,
+            text="[TEST] Exit",
+            font=("Segoe UI", 10, "bold"),
+            fg="#cbd5e1",
+            bg="#2a2a4a",
+            activebackground="#3a3a5a",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=16,
+            pady=8,
+            cursor="hand2",
+            command=self._correct_dismiss,
+        ).pack(side="left")
+
+        if resume_payload:
+            resume_button = tk.Button(
+                frame,
+                text="翻訳後、次のタスク入力へ",
+                font=("Segoe UI", 11, "bold"),
+                fg="#0f0f23",
+                bg="#2ecc71",
+                activebackground="#27ae60",
+                activeforeground="#0f0f23",
+                relief="flat",
+                padx=20,
+                pady=8,
+                cursor="hand2",
+                state="disabled",
+                command=lambda: self._do_show_resume_prompt(resume_payload),
+            )
+            resume_button.pack(pady=(14, 0))
+            unlock_widgets.append(resume_button)
+        elif recovery:
+            self._render_recovery_choices(frame, task, unlock_widgets)
+        else:
+            close_button = tk.Button(
+                frame,
+                text="Close",
+                font=("Segoe UI", 10, "bold"),
+                fg="#0f0f23",
+                bg="#2ecc71",
+                activebackground="#27ae60",
+                activeforeground="#0f0f23",
+                relief="flat",
+                padx=18,
+                pady=8,
+                cursor="hand2",
+                state="disabled",
+                command=self._correct_dismiss,
+            )
+            close_button.pack(pady=(14, 0))
+            unlock_widgets.append(close_button)
+
+    def _render_recovery_choices(self, frame, task, unlock_widgets):
+        choice_box = tk.Frame(frame, bg="#15172a", padx=14, pady=12)
+        choice_box.pack(fill="x", pady=(14, 0))
+        tk.Label(
+            choice_box,
+            text="翻訳が通ったら、次の一手を選んでください。",
+            font=("Segoe UI", 11, "bold"),
+            fg="#ffffff",
+            bg="#15172a",
+        ).pack(anchor="w", pady=(0, 8))
+
+        step_entry = tk.Entry(
+            choice_box,
+            font=("Segoe UI", 11),
+            bg="#0f0f23",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+        )
+        step_entry.insert(0, f"{task} の最小の次の一歩")
+        step_entry.pack(fill="x", pady=(0, 8))
+
+        row = tk.Frame(choice_box, bg="#15172a")
+        row.pack(fill="x", pady=(0, 8))
+        tk.Label(row, text="休息分", font=("Segoe UI", 10), fg="#cbd5e1", bg="#15172a").pack(side="left")
+        break_minutes = tk.Entry(
+            row,
+            font=("Segoe UI", 10),
+            width=8,
+            bg="#0f0f23",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+        )
+        break_minutes.insert(0, "10")
+        break_minutes.pack(side="left", padx=(8, 12))
+
+        error_label = tk.Label(choice_box, text="", font=("Segoe UI", 10), fg="#ff8a80", bg="#15172a", wraplength=680)
+        error_label.pack(fill="x", pady=(0, 8))
+
+        action_row = tk.Frame(choice_box, bg="#15172a")
+        action_row.pack(fill="x")
+        work_button = tk.Button(
+            action_row,
+            text="回到工作",
+            font=("Segoe UI", 10, "bold"),
+            fg="#ffffff",
+            bg="#2ecc71",
+            relief="flat",
+            padx=16,
+            pady=7,
+            cursor="hand2",
+            state="disabled",
+            command=lambda: self._submit_recovery_work(step_entry, error_label),
+        )
+        work_button.pack(side="left", padx=(0, 10))
+        break_button = tk.Button(
+            action_row,
+            text="开始休息",
+            font=("Segoe UI", 10, "bold"),
+            fg="#ffffff",
+            bg="#4a9eff",
+            relief="flat",
+            padx=16,
+            pady=7,
+            cursor="hand2",
+            state="disabled",
+            command=lambda: self._submit_recovery_break(break_minutes, step_entry, error_label),
+        )
+        break_button.pack(side="left")
+        unlock_widgets.extend([work_button, break_button])
+
+    def _refresh_language_label(self, label):
+        try:
+            if not self._is_showing or not label.winfo_exists():
+                return
+            label.config(text=_keyboard_layout_label())
+            self._root.after(1000, lambda: self._refresh_language_label(label))
+        except Exception:
+            pass
+
+    def _submit_translation_unlock(self, challenge, answer_entry, result_lbl, unlock_widgets):
+        if isinstance(answer_entry, tk.Text):
+            answer = answer_entry.get("1.0", "end").strip()
+        else:
+            answer = answer_entry.get().strip()
+        if not answer:
+            result_lbl.config(text="日本語訳を入力してください。", fg="#ff8a80")
+            return
+        result_lbl.config(text="AI判定中...", fg="#4a9eff")
+        threading.Thread(
+            target=lambda: self._do_translation_grade(challenge, answer, result_lbl, unlock_widgets),
+            daemon=True,
+        ).start()
+
+    def _do_translation_grade(self, challenge, answer, result_lbl, unlock_widgets):
+        try:
+            res = requests.post(
+                f"{BACKEND_URL}/strict/translation/grade",
+                json={
+                    "challenge_id": challenge.get("challenge_id", ""),
+                    "source_text": challenge.get("source_text", ""),
+                    "user_answer": answer,
+                },
+                timeout=30,
+            )
+            result = res.json()
+            if result.get("accepted"):
+                feedback = result.get("feedback", "OK")
+                self._command_queue.put(lambda: result_lbl.config(text=f"PASS: {feedback}", fg="#2ecc71"))
+                for widget in unlock_widgets:
+                    self._command_queue.put(lambda w=widget: w.config(state="normal"))
+            else:
+                feedback = result.get("feedback", "もう一度翻訳してください。")
+                self._command_queue.put(lambda: result_lbl.config(text=f"RETRY: {feedback}", fg="#e74c3c"))
+        except Exception as e:
+            self._command_queue.put(lambda: result_lbl.config(text=f"Grade failed: {e}", fg="#e74c3c"))
+
+    def _submit_recovery_work(self, step_entry, error_label):
+        step = step_entry.get().strip()
+        if not step:
+            error_label.config(text="请输入一个最小下一步。")
+            return
+        self._post_recovery("/session/recovery/work", {"minimum_next_step": step}, error_label)
+
+    def _submit_recovery_break(self, minutes_entry, step_entry, error_label):
+        try:
+            minutes = int(minutes_entry.get().strip())
+            if minutes <= 0:
+                raise ValueError()
+        except Exception:
+            error_label.config(text="休息时长需要是正整数。")
+            return
+        step = step_entry.get().strip()
+        if not step:
+            error_label.config(text="请输入休息后要做的最小下一步。")
+            return
+        self._post_recovery(
+            "/session/recovery/break",
+            {"break_minutes": minutes, "minimum_next_step": step},
+            error_label,
+        )
+
+    def _post_recovery(self, path, payload, error_label):
+        error_label.config(text="")
+        threading.Thread(target=lambda: self._do_post_recovery(path, payload, error_label), daemon=True).start()
+
+    def _do_post_recovery(self, path, payload, error_label):
+        try:
+            res = requests.post(f"{BACKEND_URL}{path}", json=payload, timeout=10)
+            if res.status_code >= 400:
+                raise RuntimeError(res.text)
+            self._command_queue.put(self._message_dismiss)
+        except Exception as e:
+            self._command_queue.put(lambda: error_label.config(text=f"操作失败：{e}"))
 
     def _render_quiz(self, quiz, task, activity, reason):
         """Render quiz UI (runs on tk thread)."""
@@ -770,6 +1282,12 @@ class _NoopBlocker:
         self.is_showing = True
 
     def show_resume_prompt(self, *args, **kwargs):
+        self.is_showing = True
+
+    def show_break_end_translation(self, *args, **kwargs):
+        self.is_showing = True
+
+    def show_stop_resume_prompt(self, *args, **kwargs):
         self.is_showing = True
 
     def dismiss(self):

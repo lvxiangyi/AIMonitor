@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, globalShortcut, Notification } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const net = require('net');
@@ -9,13 +9,48 @@ let mainWindow;
 let backendProcess = null;
 let BACKEND_PORT = 8899;
 
-const repoRoot = path.join(__dirname, '..');
 const dataEnv = process.env.AIMONITOR_DATA_ENV || 'prod';
-const logsDir = path.join(repoRoot, 'data', dataEnv, 'logs');
-const appLogPath = path.join(logsDir, 'app.log');
+
+function getSourceRoot() {
+  return path.join(__dirname, '..');
+}
+
+function getAssetRoot() {
+  return app.isPackaged ? process.resourcesPath : getSourceRoot();
+}
+
+function getAppDataRoot() {
+  return process.env.AIMONITOR_APP_ROOT || (app.isPackaged ? app.getPath('userData') : getSourceRoot());
+}
+
+function getEnvFilePath() {
+  if (process.env.AIMONITOR_ENV_FILE) {
+    return process.env.AIMONITOR_ENV_FILE;
+  }
+
+  if (app.isPackaged) {
+    const portableEnvPath = path.join(path.dirname(process.execPath), '.env');
+    if (fs.existsSync(portableEnvPath)) {
+      return portableEnvPath;
+    }
+    return path.join(getAppDataRoot(), '.env');
+  }
+
+  return path.join(getSourceRoot(), '.env');
+}
+
+function getLogsDir() {
+  return path.join(getAppDataRoot(), 'data', dataEnv, 'logs');
+}
+
+function getAppLogPath() {
+  return path.join(getLogsDir(), 'app.log');
+}
 
 function writeAppLog(message) {
   try {
+    const logsDir = getLogsDir();
+    const appLogPath = getAppLogPath();
     fs.mkdirSync(logsDir, { recursive: true });
     fs.appendFileSync(appLogPath, `[${new Date().toISOString()}] ${message}\n`, 'utf8');
   } catch (e) {
@@ -53,18 +88,23 @@ function getFreePort(startPort = 8899) {
 }
 
 function startBackend(port) {
-  const backendDir = path.join(__dirname, '..', 'backend');
+  const backendDir = path.join(getAssetRoot(), 'backend');
+  const packagedBackend = path.join(backendDir, 'aimonitor-backend.exe');
   const venvPython = path.join(backendDir, '.venv', 'Scripts', 'python.exe');
-  let pythonCommand = venvPython;
+  let command = venvPython;
+  let args = ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)];
 
-  if (!fs.existsSync(venvPython)) {
-    pythonCommand = 'python';
+  if (app.isPackaged && fs.existsSync(packagedBackend)) {
+    command = packagedBackend;
+    args = [];
+  } else if (!fs.existsSync(venvPython)) {
+    command = 'python';
     logWarn(`[backend] ${venvPython} was not found. Falling back to global "python". Run setup_windows.bat to create the project virtual environment.`);
   }
 
   backendProcess = spawn(
-    pythonCommand,
-    ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)],
+    command,
+    args,
     {
       cwd: backendDir,
       shell: false,
@@ -72,6 +112,8 @@ function startBackend(port) {
         ...process.env,
         FOCUSGUARD_PORT: String(port),
         AIMONITOR_DATA_ENV: process.env.AIMONITOR_DATA_ENV || 'prod',
+        AIMONITOR_APP_ROOT: getAppDataRoot(),
+        AIMONITOR_ENV_FILE: getEnvFilePath(),
       },
     },
   );
@@ -150,7 +192,7 @@ function createWindow(port) {
   });
 
   const apiBase = `http://127.0.0.1:${port}`;
-  const frontendPath = path.join(__dirname, '..', 'frontend', 'dist', 'index.html');
+  const frontendPath = path.join(getAssetRoot(), 'frontend', 'dist', 'index.html');
 
   if (process.env.AIMONITOR_ELECTRON_DEV === '1') {
     const devUrl = process.env.AIMONITOR_FRONTEND_DEV_URL || 'http://127.0.0.1:3000';
@@ -205,6 +247,79 @@ function stopBackend() {
   backendProcess = null;
 }
 
+function postJson(pathname, payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload || {});
+    const req = http.request(
+      {
+        hostname: '127.0.0.1',
+        port: BACKEND_PORT,
+        path: pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode >= 400) {
+            reject(new Error(data || `HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(data || '{}'));
+          } catch (e) {
+            resolve({});
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function notify(title, body) {
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title, body }).show();
+    }
+  } catch (e) {
+    logWarn(`[dataset] Notification failed: ${e}`);
+  }
+}
+
+function registerDatasetShortcuts() {
+  const shortcuts = [
+    ['CommandOrControl+Alt+1', 'on_task'],
+    ['CommandOrControl+Alt+2', 'off_task'],
+    ['CommandOrControl+Alt+3', 'ambiguous'],
+    ['CommandOrControl+Alt+0', 'unlabeled'],
+  ];
+
+  shortcuts.forEach(([accelerator, label]) => {
+    const ok = globalShortcut.register(accelerator, async () => {
+      try {
+        const result = await postJson('/dataset/capture', { label });
+        const sampleId = result && result.sample && result.sample.id ? result.sample.id : '';
+        notify('AIMonitor dataset', `Captured ${label}${sampleId ? ` (${sampleId.slice(0, 8)})` : ''}`);
+      } catch (e) {
+        logError(`[dataset] Capture failed for ${label}:`, e);
+        notify('AIMonitor dataset capture failed', String(e.message || e));
+      }
+    });
+    if (!ok) {
+      logWarn(`[dataset] Failed to register shortcut ${accelerator}`);
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   if (process.env.AIMONITOR_SKIP_BACKEND === '1') {
     BACKEND_PORT = Number(process.env.AIMONITOR_BACKEND_PORT || 8000);
@@ -224,6 +339,7 @@ app.whenReady().then(async () => {
   }
 
   createWindow(BACKEND_PORT);
+  registerDatasetShortcuts();
 });
 
 app.on('window-all-closed', () => {
@@ -232,5 +348,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  globalShortcut.unregisterAll();
   stopBackend();
 });

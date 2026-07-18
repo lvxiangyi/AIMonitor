@@ -39,6 +39,7 @@ class AutoSchedulerTests(unittest.IsolatedAsyncioTestCase):
             date=now.date().isoformat(),
             start_time=start.strftime("%H:%M"),
             end_time=end.strftime("%H:%M"),
+            strict_mode=True,
         )
 
         AutoScheduler().process_due_schedules(now=now)
@@ -46,6 +47,7 @@ class AutoSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session_manager.active)
         self.assertEqual(session_manager.schedule_id, entry["id"])
         self.assertTrue(session_manager.late_started)
+        self.assertTrue(session_manager.strict_mode)
         self.assertEqual(get_schedules()[0]["status"], "in_progress")
 
         session_manager.stop_session(status="completed")

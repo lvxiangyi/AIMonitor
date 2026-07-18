@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 from data_paths import LOGS_DIR
+from settings_manager import get_default_check_interval_seconds, get_default_strict_mode, get_default_trigger_threshold
 
 SCHEDULE_FILE = LOGS_DIR / "schedules.json"
 
@@ -47,8 +48,11 @@ def add_schedule(
     date: str,
     start_time: str,
     duration_minutes: Optional[int] = None,
-    check_interval_seconds: int = 30,
+    check_interval_seconds: Optional[int] = None,
+    trigger_threshold: Optional[int] = None,
     end_time: Optional[str] = None,
+    tags: Optional[list] = None,
+    strict_mode: Optional[bool] = None,
 ) -> dict:
     """Add a new scheduled study session."""
     task = (task or "").strip()
@@ -82,7 +86,12 @@ def add_schedule(
         "start_time": start_time,
         "end_time": end_time,
         "duration_minutes": duration_minutes,
-        "check_interval_seconds": check_interval_seconds,
+        "check_interval_seconds": (
+            check_interval_seconds if check_interval_seconds is not None else get_default_check_interval_seconds()
+        ),
+        "trigger_threshold": trigger_threshold if trigger_threshold is not None else get_default_trigger_threshold(),
+        "tags": [str(tag).strip() for tag in (tags or []) if str(tag).strip()],
+        "strict_mode": get_default_strict_mode() if strict_mode is None else bool(strict_mode),
         "status": "scheduled",
         "created_at": datetime.now().isoformat(),
     }

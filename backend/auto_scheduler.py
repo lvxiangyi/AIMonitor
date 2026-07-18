@@ -6,6 +6,7 @@ from typing import Optional
 from report_manager import record_block
 from schedule_manager import get_schedules, remove_schedule, schedule_window, update_schedule_status
 from session_manager import session_manager
+from settings_manager import get_default_check_interval_seconds, get_default_strict_mode, get_default_trigger_threshold
 
 
 class AutoScheduler:
@@ -63,12 +64,15 @@ class AutoScheduler:
             session_manager.start_session(
                 task=schedule["task"],
                 duration_minutes=remaining_minutes,
-                check_interval_seconds=int(schedule.get("check_interval_seconds", 30)),
+                check_interval_seconds=int(schedule.get("check_interval_seconds") or get_default_check_interval_seconds()),
+                trigger_threshold=int(schedule.get("trigger_threshold") or get_default_trigger_threshold()),
                 source="schedule",
                 schedule_id=schedule["id"],
                 planned_start=start.isoformat(),
                 planned_end=end.isoformat(),
                 late_started=late_started,
+                tags=schedule.get("tags", []),
+                strict_mode=bool(schedule.get("strict_mode", get_default_strict_mode())),
             )
             update_schedule_status(schedule["id"], "in_progress")
             print(f"[auto_scheduler] Started schedule {schedule['id']} for {remaining_minutes} minutes.")
@@ -92,6 +96,9 @@ class AutoScheduler:
             "focused_checks": 0,
             "distracted_checks": 0,
             "api_error_checks": 0,
+            "tags": schedule.get("tags", []),
+            "strict_mode": bool(schedule.get("strict_mode", get_default_strict_mode())),
+            "trigger_threshold": int(schedule.get("trigger_threshold") or get_default_trigger_threshold()),
         })
         print(f"[auto_scheduler] Schedule {schedule['id']} recorded as {status}.")
 

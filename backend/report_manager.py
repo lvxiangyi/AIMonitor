@@ -38,8 +38,12 @@ def _empty_day(date: str) -> dict:
     return {
         "date": date,
         "total_focus_minutes": 0,
+        "total_break_minutes": 0,
+        "total_stopped_minutes": 0,
         "total_blocks": 0,
         "completed_blocks": 0,
+        "today_summary": "",
+        "tomorrow_plan": "",
         "blocks": [],
     }
 
@@ -49,6 +53,14 @@ def _recalculate(day: dict):
     day["total_blocks"] = len(blocks)
     day["completed_blocks"] = sum(1 for b in blocks if b.get("status") == "completed")
     day["total_focus_minutes"] = round(sum(float(b.get("focus_minutes", 0)) for b in blocks), 1)
+    day["total_break_minutes"] = round(
+        sum(float(b.get("duration_minutes", 0)) for b in blocks if b.get("status") == "break"),
+        1,
+    )
+    day["total_stopped_minutes"] = round(
+        sum(float(b.get("duration_minutes", 0)) for b in blocks if b.get("status") == "stopped_pending"),
+        1,
+    )
 
 
 def record_block(block: dict) -> dict:
@@ -72,4 +84,16 @@ def get_daily_report(date: Optional[str] = None) -> dict:
     reports = _load_reports()
     day = reports.get(target) or _empty_day(target)
     _recalculate(day)
+    return day
+
+
+def save_daily_notes(date: Optional[str], today_summary: str, tomorrow_plan: str) -> dict:
+    target = date or datetime.now().date().isoformat()
+    reports = _load_reports()
+    day = reports.get(target) or _empty_day(target)
+    day["today_summary"] = today_summary or ""
+    day["tomorrow_plan"] = tomorrow_plan or ""
+    _recalculate(day)
+    reports[target] = day
+    _save_reports(reports)
     return day

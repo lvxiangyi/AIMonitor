@@ -39,6 +39,10 @@ class FlowManagerTests(unittest.IsolatedAsyncioTestCase):
             duration_minutes=25,
             check_interval_seconds=30,
             source="flow",
+            tags=None,
+            strict_mode=True,
+            trigger_threshold=1,
+            first_check_delay_seconds=2,
         )
 
     async def test_start_break_records_report_and_pending_resume(self):
@@ -54,6 +58,29 @@ class FlowManagerTests(unittest.IsolatedAsyncioTestCase):
         report = get_daily_report()
         self.assertEqual(report["blocks"][0]["status"], "break")
         self.assertEqual(report["blocks"][0]["task"], "walk outside")
+        self.assertEqual(report["total_break_minutes"], 10)
+
+    async def test_manual_start_can_cancel_pending_break_without_later_prompt(self):
+        self.flow.start_break(
+            break_minutes=10,
+            activity="walk outside",
+            task="product",
+            duration_minutes=25,
+            check_interval_seconds=30,
+        )
+
+        self.flow.cancel_pending_break()
+
+        self.assertIsNone(self.flow.pending_resume)
+
+    async def test_start_stop_pause_records_status(self):
+        self.flow.start_stop_pause("meeting", 15, tags=["work"])
+
+        self.assertEqual(self.flow.pending_stop["reason"], "meeting")
+        report = get_daily_report()
+        self.assertEqual(report["blocks"][0]["status"], "stopped_pending")
+        self.assertEqual(report["blocks"][0]["tags"], ["work"])
+        self.assertEqual(report["total_stopped_minutes"], 15)
 
     async def test_pause_day_records_activity(self):
         self.flow.pause_day("go shopping")

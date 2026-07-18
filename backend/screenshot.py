@@ -1,6 +1,7 @@
 import ctypes
 import os
 from ctypes import wintypes
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import mss
@@ -56,9 +57,10 @@ def _select_monitor(monitors: List[Dict]) -> Dict:
     return monitors[1] if len(monitors) > 1 else monitors[0]
 
 
-def take_screenshot(width: int = 768) -> str:
+def take_screenshot(width: int = 768, output_path: Optional[str] = None) -> str:
     """Take a screenshot of the cursor's monitor, resize it, and return the file path."""
-    output_path = str(SCREENSHOT_DIR / "latest.jpg")
+    output = Path(output_path) if output_path else SCREENSHOT_DIR / "latest.jpg"
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     with mss.mss() as sct:
         monitor = _select_monitor(sct.monitors)
@@ -70,5 +72,5 @@ def take_screenshot(width: int = 768) -> str:
     new_height = int(img.height * ratio)
     img = img.resize((width, new_height), Image.LANCZOS)
 
-    img.save(output_path, "JPEG", quality=70)
-    return output_path
+    img.save(str(output), "JPEG", quality=70)
+    return str(output)

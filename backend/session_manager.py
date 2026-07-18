@@ -2,6 +2,7 @@ import asyncio
 import json
 import uuid
 import time
+import math
 from datetime import datetime
 from typing import Optional
 
@@ -10,6 +11,13 @@ from report_manager import record_block
 from screenshot import take_screenshot
 from vision_judge import judge_screenshot, evaluate_dispute
 from blocker_window import blocker
+from settings_manager import (
+    get_default_check_interval_seconds,
+    get_default_strict_mode,
+    get_default_trigger_threshold,
+    get_nudge_prompt,
+    get_supervision_level,
+)
 
 
 LOG_FILE = LOGS_DIR / "session_logs.jsonl"
@@ -40,7 +48,8 @@ class SessionManager:
         self.session_id: Optional[str] = None
         self.task: Optional[str] = None
         self.duration_minutes: int = 10
-        self.check_interval_seconds: int = 30
+        self.check_interval_seconds: int = get_default_check_interval_seconds()
+        self.trigger_threshold: int = get_default_trigger_threshold()
         self.active: bool = False
         self.start_time: Optional[float] = None
         self.latest_judgement: Optional[dict] = None
@@ -54,6 +63,11 @@ class SessionManager:
         self.planned_start: Optional[str] = None
         self.planned_end: Optional[str] = None
         self.late_started: bool = False
+        self.tags: list = []
+        self.strict_mode: bool = True
+        self.supervision_level: str = get_supervision_level()
+        self.recovery_actions: list = []
+        self.first_check_delay_seconds: float = 0
         self._finalized: bool = False
 
     def start_session(
@@ -66,6 +80,11 @@ class SessionManager:
         planned_start: Optional[str] = None,
         planned_end: Optional[str] = None,
         late_started: bool = False,
+        tags: Optional[list] = None,
+        strict_mode: Optional[bool] = None,
+        supervision_level: Optional[str] = None,
+        trigger_threshold: Optional[int] = None,
+        first_check_delay_seconds: float = 0,
     ) -> str:
         """Start a new monitoring session."""
         task = (task or "").strip()
@@ -75,6 +94,8 @@ class SessionManager:
             raise ValueError("Duration must be greater than 0.")
         if check_interval_seconds <= 0:
             raise ValueError("Check interval must be greater than 0.")
+        if trigger_threshold is not None and trigger_threshold <= 0:
+            raise ValueError("Trigger threshold must be greater than 0.")
 
         if self.active:
             self.stop_session(status="replaced")
@@ -83,6 +104,7 @@ class SessionManager:
         self.task = task
         self.duration_minutes = duration_minutes
         self.check_interval_seconds = check_interval_seconds
+        self.trigger_threshold = trigger_threshold if trigger_threshold is not None else get_default_trigger_threshold()
         self.active = True
         self.start_time = time.time()
         self.latest_judgement = None
@@ -95,6 +117,11 @@ class SessionManager:
         self.planned_start = planned_start
         self.planned_end = planned_end
         self.late_started = late_started
+        self.tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+        self.strict_mode = get_default_strict_mode() if strict_mode is None else bool(strict_mode)
+        self.supervision_level = supervision_level or get_supervision_level()
+        self.recovery_actions = []
+        self.first_check_delay_seconds = max(0, float(first_check_delay_seconds or 0))
         self._finalized = False
 
         # Start background monitoring loop
@@ -102,9 +129,9 @@ class SessionManager:
 
         return self.session_id
 
-    def stop_session(self, status: str = "stopped", notify: bool = False):
+    def stop_session(self, status: str = "stopped", notify: bool = False, stop_reason: Optional[str] = None):
         """Stop the current session."""
-        self._finish_session(status=status, notify=notify)
+        self._finish_session(status=status, notify=notify, stop_reason=stop_reason)
         current_task = None
         try:
             current_task = asyncio.current_task()
@@ -114,7 +141,7 @@ class SessionManager:
             self._loop_task.cancel()
         self._loop_task = None
 
-    def _finish_session(self, status: str, notify: bool = False):
+    def _finish_session(self, status: str, notify: bool = False, stop_reason: Optional[str] = None):
         """Finalize the current session and write it to the daily report."""
         if self._finalized or not self.session_id:
             self.active = False
@@ -152,7 +179,13 @@ class SessionManager:
             "focused_checks": focused_checks,
             "distracted_checks": distracted_checks,
             "api_error_checks": api_error_checks,
+            "tags": self.tags,
+            "strict_mode": self.strict_mode,
+            "supervision_level": self.supervision_level,
+            "trigger_threshold": self.trigger_threshold,
         }
+        if stop_reason:
+            block["stop_reason"] = stop_reason
         record_block(block)
         if self.schedule_id:
             try:
@@ -168,6 +201,9 @@ class SessionManager:
                     "task": self.task,
                     "duration_minutes": self.duration_minutes,
                     "check_interval_seconds": self.check_interval_seconds,
+                    "tags": self.tags,
+                    "strict_mode": self.strict_mode,
+                    "trigger_threshold": self.trigger_threshold,
                     "focus_minutes": block["focus_minutes"],
                     "distracted_checks": distracted_checks,
                     "api_error_checks": api_error_checks,
@@ -240,8 +276,54 @@ class SessionManager:
             "schedule_id": self.schedule_id,
             "planned_start": self.planned_start,
             "planned_end": self.planned_end,
+            "tags": self.tags,
+            "strict_mode": self.strict_mode,
+            "supervision_level": self.supervision_level,
+            "trigger_threshold": self.trigger_threshold,
             "logs": self.logs[-20:],  # Return last 20 logs
+            "recovery_actions": self.recovery_actions[-10:],
         }
+
+    def record_recovery_action(self, action: str, minimum_next_step: str = "", break_minutes: Optional[int] = None):
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "session_id": self.session_id,
+            "action": action,
+            "minimum_next_step": minimum_next_step,
+        }
+        if break_minutes is not None:
+            entry["break_minutes"] = break_minutes
+        self.recovery_actions.append(entry)
+
+    def choose_recovery_work(self, minimum_next_step: str):
+        step = (minimum_next_step or "").strip()
+        if not step:
+            raise ValueError("请输入一个最小下一步。")
+        self.record_recovery_action("work", step)
+        self.acknowledge_block()
+
+    def choose_recovery_break(self, break_minutes: int, minimum_next_step: str) -> dict:
+        step = (minimum_next_step or "").strip()
+        if not step:
+            raise ValueError("请输入休息后要做的最小下一步。")
+        if break_minutes <= 0:
+            raise ValueError("休息时长需要是正整数。")
+        if not self.active:
+            raise ValueError("当前没有正在运行的 Session。")
+
+        payload = {
+            "task": self.task or step,
+            "duration_minutes": max(1, math.ceil(self.get_remaining_seconds() / 60)),
+            "check_interval_seconds": self.check_interval_seconds,
+            "trigger_threshold": self.trigger_threshold,
+            "tags": self.tags,
+            "strict_mode": self.strict_mode,
+            "minimum_next_step": step,
+        }
+        self.record_recovery_action("break", step, break_minutes)
+        self.stop_session(status="break_requested", stop_reason=f"Recovery break: {step}")
+        payload["break_minutes"] = break_minutes
+        return payload
 
     def _apply_judgement(self, result: dict) -> str:
         """Apply a judgement to streak/blocking state and return its status."""
@@ -255,7 +337,7 @@ class SessionManager:
         else:
             self.off_task_streak += 1
 
-        if self.off_task_streak >= 2:
+        if self.off_task_streak >= self.trigger_threshold:
             self.should_block = True
 
         return judgement_status
@@ -263,6 +345,8 @@ class SessionManager:
     async def _monitor_loop(self):
         """Background loop: take screenshot, judge, update state."""
         try:
+            if self.first_check_delay_seconds > 0:
+                await asyncio.sleep(self.first_check_delay_seconds)
             while self.active:
                 # Check if session time is up
                 if self.get_remaining_seconds() <= 0:
@@ -279,7 +363,12 @@ class SessionManager:
                     continue
 
                 # Judge (pass memory for context)
-                result = judge_screenshot(self.task, screenshot_path, memory=self.dispute_memory)
+                result = judge_screenshot(
+                    self.task,
+                    screenshot_path,
+                    memory=self.dispute_memory,
+                    supervision_level=self.supervision_level,
+                )
                 self.latest_judgement = result
                 judgement_status = self._apply_judgement(result)
 
@@ -292,6 +381,8 @@ class SessionManager:
                                 task=self.task,
                                 activity=result.get("current_activity", ""),
                                 reason=result.get("reason", ""),
+                                strict_mode=self.strict_mode,
+                                nudge_message=get_nudge_prompt(),
                             )
                         except Exception as e:
                             print(f"[session] Blocker show error (non-fatal): {e}")
@@ -309,6 +400,8 @@ class SessionManager:
                     "current_activity": result.get("current_activity", ""),
                     "reason": result.get("reason", ""),
                     "model": result.get("model", ""),
+                    "supervision_level": self.supervision_level,
+                    "trigger_threshold": self.trigger_threshold,
                     "screenshot_path": screenshot_path,
                 }
                 self.logs.append(log_entry)

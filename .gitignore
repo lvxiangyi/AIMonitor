@@ -2,6 +2,10 @@ node_modules/
 dist/
 .venv/
 backend/.venv/
+backend/build/
+backend/*.spec
+electron/.cache/
+electron/release/
 __pycache__/
 *.pyc
 .env
